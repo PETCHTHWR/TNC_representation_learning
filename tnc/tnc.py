@@ -269,6 +269,7 @@ def main(is_train, data_type, cv, w, cont):
                 x = pickle.load(f)
             learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100,
                           mc_sample_size=40, path='simulation', device=device, augmentation=5, n_cross_val=cv)
+
         else:
             # Plot the distribution of the encodings and use the learnt encoders to train a downstream classifier
             with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
@@ -360,5 +361,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print('TNC model with w=%f'%args.w)
     main(args.train, args.data, args.cv, args.w, args.cont)
-
-
