@@ -1,5 +1,5 @@
 import numpy as np
-import TimeSynth.timesynth as ts
+import timesynth as ts
 import matplotlib.pyplot as plt
 import seaborn as sns; sns.set()
 
@@ -26,30 +26,35 @@ def main(n_samples, sig_len):
         all_states.append(sample_state)
 
     dataset = np.array(all_signals)
+    print(dataset.shape)
     states = np.array(all_states)
+
+
     n_train = int(len(dataset) * 0.8)
     train_data = dataset[:n_train]
     test_data = dataset[n_train:]
+
+
     train_data_n, test_data_n = normalize(train_data, test_data)
     train_state = states[:n_train]
     test_state = states[n_train:]
 
     print("Dataset Shape ====> \tTrainset: ", train_data_n.shape, "\tTestset: ", test_data_n.shape)
 
-    ## Plot a sample
-    # f, axes = plt.subplots(3,1)
-    # f.set_figheight(3)
-    # f.set_figwidth(10)
-    # # print(train_state[0])
-    # color = [[0.6350, 0.0780, 0.1840], [0.4660, 0.6740, 0.1880], [0, 0.4470, 0.7410]]
-    # for i,ax in enumerate(axes):
-    #     ax.plot(train_data_n[0,i,:],  c=color[i])
-    #     for t in range(train_data_n[0,i,:].shape[-1]):
-    #         ax.axvspan(t, min(t+1, train_state.shape[-1]-1),
-    #                    facecolor=['y', 'g', 'b', 'r'][train_state[0,t]], alpha=0.3)
-    # f.set_figheight(6)
-    # f.set_figwidth(12)
-    # plt.savefig('./simulation_sample.pdf')
+    # Plot a sample
+    f, axes = plt.subplots(3,1)
+    f.set_figheight(3)
+    f.set_figwidth(10)
+    #print(train_state[0])
+    color = [[0.6350, 0.0780, 0.1840], [0.4660, 0.6740, 0.1880], [0, 0.4470, 0.7410]]
+    for i,ax in enumerate(axes):
+        ax.plot(train_data_n[0,i,:],  c=color[i])
+    for t in range(train_data_n[0,i,:].shape[-1]):
+        ax.axvspan(t, min(t+1, train_state.shape[-1]-1),
+        facecolor=['y', 'g', 'b', 'r'][train_state[0,t]], alpha=0.3)
+    f.set_figheight(6)
+    f.set_figwidth(12)
+    plt.savefig('./simulation_sample.png')
 
     ## Save signals to file
     if not os.path.exists('./data/simulated_data'):
