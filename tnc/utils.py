@@ -71,8 +71,8 @@ def track_encoding(sample, label, encoder, window_size, path, sliding_gap=5):
         axs[0] = plt.subplot(gs[0])
         axs[1] = plt.subplot(gs[1])
         axs[2] = plt.subplot(gs[2])
-        sns.lineplot(np.arange(0,sample.shape[1]/250, 1./250), sample[0], ax=axs[0])
-        sns.lineplot(np.arange(0,sample.shape[1]/250, 1./250), sample[1], ax=axs[1])
+        sns.lineplot(x=np.arange(0,sample.shape[1]/250, 1./250), y=sample[0], ax=axs[0])
+        sns.lineplot(x=np.arange(0,sample.shape[1]/250, 1./250), y=sample[1], ax=axs[1])
         axs[1].margins(x=0)
         axs[1].grid(False)
         axs[1].xaxis.set_tick_params(labelsize=22)
@@ -83,7 +83,7 @@ def track_encoding(sample, label, encoder, window_size, path, sliding_gap=5):
         f.set_figheight(10)
         f.set_figwidth(27)
         for feat in range(min(sample.shape[0], 5)):
-            sns.lineplot(np.arange(sample.shape[1]), sample[feat], ax=axs[0])
+            sns.lineplot(x=np.arange(sample.shape[1]), y=sample[feat], ax=axs[0])
 
     axs[0].set_title('Time series Sample Trajectory', fontsize=30, fontweight='bold')
     axs[0].xaxis.set_tick_params(labelsize=22)

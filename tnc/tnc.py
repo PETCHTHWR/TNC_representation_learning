@@ -25,7 +25,6 @@ if not sys.warnoptions:
     warnings.simplefilter("ignore")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-
 class Discriminator(torch.nn.Module):
     def __init__(self, input_size, device):
         super(Discriminator, self).__init__()
@@ -290,6 +289,18 @@ def main(is_train, data_type, cv, w, cont):
                     tnc_acc, tnc_auc, e2e_acc, e2e_auc = exp.run(data='simulation', n_epochs=150, lr_e2e=lr, lr_cls=lr)
                     print('TNC acc: %.2f \t TNC auc: %.2f \t E2E acc: %.2f \t E2E auc: %.2f'%(tnc_acc, tnc_auc, e2e_acc, e2e_auc))
 
+    if data_type == 'ADSB_arr':
+        if is_train:
+            pass
+        else:
+            pass
+
+    if data_type == 'ADSB_dep':
+        if is_train:
+            pass
+        else:
+            pass
+
     if data_type == 'waveform':
         window_size = 2500
         path = './data/waveform_data/processed'
@@ -356,8 +367,12 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='simulation')
     parser.add_argument('--cv', type=int, default=1)
     parser.add_argument('--w', type=float, default=0.05)
-    parser.add_argument('--train', action='store_true')
+    parser.add_argument('--train', action='store_true', default=False)
     parser.add_argument('--cont', action='store_true')
     args = parser.parse_args()
     print('TNC model with w=%f'%args.w)
+    print('Data: %s'%args.data)
+    print('Cross validation: %d'%args.cv)
+    print('Train: %s'%args.train)
+    print('Continue: %s'%args.cont)
     main(args.train, args.data, args.cv, args.w, args.cont)
