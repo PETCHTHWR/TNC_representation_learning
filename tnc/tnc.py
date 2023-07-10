@@ -16,7 +16,7 @@ import os
 import random
 
 from tnc.models import RnnEncoder, WFEncoder
-from tnc.utils import plot_distribution, track_encoding
+from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa.stattools import adfuller
 
@@ -179,6 +179,12 @@ def learn_encoder(x, encoder, window_size, w, lr=0.001, decay=0.005, mc_sample_s
         elif 'simulation' in path:
             encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
             batch_size = 10
+        elif 'ADSB_arr' in path:
+            encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+            batch_size = 10
+        elif 'ADSB_dep' in path:
+            encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+            batch_size = 10
         elif 'har' in path:
             encoder = RnnEncoder(hidden_size=100, in_channel=561, encoding_size=10, device=device)
             batch_size = 10
@@ -290,16 +296,46 @@ def main(is_train, data_type, cv, w, cont):
                     print('TNC acc: %.2f \t TNC auc: %.2f \t E2E acc: %.2f \t E2E auc: %.2f'%(tnc_acc, tnc_auc, e2e_acc, e2e_auc))
 
     if data_type == 'ADSB_arr':
+        window_size = 50
+        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+        path = './data/ADSB_data_arr/'
         if is_train:
-            pass
+            with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
+                x = pickle.load(f)
+
+            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100,
+                            mc_sample_size=40, path='ADSB_arr', device=device, augmentation=5, n_cross_val=cv)
         else:
-            pass
+            with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
+                x_test = pickle.load(f)
+            with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
+                traj_test = pickle.load(f)
+            checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            encoder = encoder.to(device)
+            for i in range(100):
+                track_encoding_ADSB(x_test[i,:,:], traj_test[i,:,:], encoder, window_size, 'ADSB_arr', i)
 
     if data_type == 'ADSB_dep':
+        window_size = 50
+        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+        path = './data/ADSB_data_dep/'
         if is_train:
-            pass
+            with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
+                x = pickle.load(f)
+
+            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100,
+                            mc_sample_size=40, path='ADSB_dep', device=device, augmentation=5, n_cross_val=cv)
         else:
-            pass
+            with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
+                x_test = pickle.load(f)
+            with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
+                traj_test = pickle.load(f)
+            checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            encoder = encoder.to(device)
+            for i in range(100):
+                track_encoding_ADSB(x_test[i,:,:], traj_test[i,:,:], encoder, window_size, 'ADSB_dep', i)
 
     if data_type == 'waveform':
         window_size = 2500

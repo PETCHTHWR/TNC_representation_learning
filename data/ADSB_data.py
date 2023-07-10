@@ -1,10 +1,183 @@
-import numpy as np
+import time
 import pandas as pd
+import numpy as np
+import cupy as cp
+import random
+from sqlalchemy import create_engine
+import matplotlib.pyplot as plt
+import os
+import pickle
+from tqdm import tqdm
+import connectorx as cx
+from atfm.preprocess import preprocess
+from atfm.utils import map_RWY, map_corridors
+from atfm.utils import check_eligible
 
-data_path = 'D:/KAIST/KAIST_labwork/ADSB_data/'
-arr_csv_path = data_path + 'ADSB_arr.csv'
-dep_csv_path = data_path + 'ADSB_dep.csv'
+def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate the unit vectors of the trajectory DataFrame.
+    Input:
+        flt_df: A DataFrame containing the trajectory data of a single flight.
+    Output:
+        unit_df: A DataFrame containing the unit vectors of the trajectory.
+    """
+    diff_df = flt_df.diff().dropna() # Create a new DataFrame for the differences
+    norms = np.sqrt((diff_df**2).sum(axis=1)) # Calculate the norm of each difference vector
+    unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
+    unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
 
-arr_df = pd.read_csv(arr_csv_path)
-dep_df = pd.read_csv(dep_csv_path)
+    return unit_df
 
+def is_smooth(df, threshold):
+    """
+    Check if the trajectory is smooth.
+    Input:
+        df: A DataFrame containing the unit vectors of the trajectory.
+        threshold: The maximum allowed change in direction angle.
+    Output:
+        True if the trajectory is smooth, False otherwise.
+    """
+
+    # Convert the unit vector columns to a numpy array
+    unit_vectors = df[['u_x', 'u_y', 'u_z']].values
+
+    # Calculate the dot product between consecutive unit vectors
+    dot_products = cp.einsum('ij, ij->i', unit_vectors[:-1], unit_vectors[1:])
+
+    # Calculate the change in direction angles
+    direction_changes = cp.arccos(np.clip(dot_products, -1.0, 1.0)) * 180 / cp.pi
+
+    # Apply modulo operation to keep angles within 360 degrees
+    direction_changes = direction_changes % 360
+
+    # Check if any direction change exceeds the threshold
+    if cp.max(direction_changes) <= threshold:
+        return True
+    else:
+        return False
+
+db_url = 'mysql://lics:aelics070@143.248.69.46:13306/atfm_new'
+id_tab = 'flight'
+ADSB_tab = 'trajectory'
+too_short = 500
+too_long = 2000
+icn_lat, icn_lon, icn_alt = 37.49491667, 126.43033333, 8.0
+min_alt_change = 2000 / 3.281 # meters
+min_FAF_baro = 1600 / 3.281 # meters
+app_sector_rad = 25 # nautical miles
+target_length = too_long + 1
+sample_size = 3000
+data_size = 500
+
+
+ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
+ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().sample(n=sample_size)
+ADSB_arr = cx.read_sql(db_url, f"SELECT * FROM %s WHERE flight_id IN ({', '.join(map(str, ids_arr.values.T.tolist()[0]))});" % (ADSB_tab), return_type="arrow")
+ADSB_arr = ADSB_arr.to_pandas(split_blocks=False, date_as_object=False).dropna()
+ADSB_arr['time'] = pd.to_datetime(ADSB_arr['time'], unit='s')
+print('Total Arrival :', ids_arr.shape[0])
+
+ids_dep = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=0" % (id_tab, too_short, too_long), return_type="arrow")
+ids_dep = ids_dep.to_pandas(split_blocks=False, date_as_object=False).dropna().sample(n=sample_size)
+ADSB_dep = cx.read_sql(db_url, f"SELECT * FROM %s WHERE flight_id IN ({', '.join(map(str, ids_dep.values.T.tolist()[0]))});" % (ADSB_tab), return_type="arrow")
+ADSB_dep = ADSB_dep.to_pandas(split_blocks=False, date_as_object=False).dropna()
+ADSB_dep['time'] = pd.to_datetime(ADSB_dep['time'], unit='s')
+print('Total Departure :', ids_dep.shape[0])
+
+
+arr_dep = []
+for ADSB in [ADSB_arr, ADSB_dep]:
+    num_reject = 0
+    df_ls = []
+    for id in tqdm(set(ADSB['flight_id'].values.tolist())):
+
+        flt_df = ADSB.loc[ADSB['flight_id'] == id]
+        flt_df = flt_df.set_index('time')
+
+        if not check_eligible(flt_df, min_alt_change, min_FAF_baro, icn_lat, icn_lon, app_sector_rad, alt_col='baroaltitude'):
+            num_reject += 1
+            continue
+
+        try:
+            flt_df = preprocess(flt_df, ref_lat=icn_lat, ref_lon=icn_lon, ref_alt=icn_alt, periods=target_length, max_range_x=150, max_range_y=150, alt_column='baroaltitude')
+            flt_df = flt_df.dropna()
+        except Exception:
+            num_reject += 1
+            continue
+
+        unit_df = calculate_unit_vectors(flt_df)
+        if not is_smooth(unit_df, 60):
+            num_reject += 1
+            continue
+
+        joined_df = pd.concat([flt_df, unit_df], axis=1)
+        joined_df[unit_df.columns] = joined_df[unit_df.columns].shift(-1)
+        df_ls.append(joined_df)
+
+    print('Rejected %d flights' % num_reject)
+    arr_dep.append(df_ls) # arr_dep[0] is arrival, arr_dep[1] is departure
+
+for df_ls in arr_dep:
+
+    if len(df_ls) < data_size:
+        print('Not enough data')
+        continue
+
+    random.seed(42)  # Set a common seed value for consistent sampling
+
+    flt_traj_and_path_ls = [df.dropna().T.to_numpy() for df in df_ls if df.iloc[:, -3:].dropna(how='all').T.shape == (3, target_length-1)]
+    sampled_data = random.sample(flt_traj_and_path_ls, data_size)
+
+    flt_traj_ls = [data[:3, :] for data in sampled_data]
+    flt_traj_array = np.stack(flt_traj_ls, axis=0)
+
+    flt_path_ls = [data[-3:, :] for data in sampled_data]
+    flt_path_array = np.stack(flt_path_ls, axis=0)
+
+    n_train = int(len(flt_path_array) * 0.8)
+    train_data = flt_path_array[:n_train]
+    test_data = flt_path_array[n_train:]
+    train_traj = flt_traj_array[:n_train]
+    test_traj = flt_traj_array[n_train:]
+
+    print("Data for Arrival" if df_ls is arr_dep[0] else "Data for Departure")
+    print("Flight Path Dataset Shape ====> \tTrainset: ", train_data.shape, "\tTestset: ", test_data.shape)
+    print("Reference Trajectory Shape ====> \tTrainset: ", train_traj.shape, "\tTestset: ", test_traj.shape)
+
+    ## Save signals to file
+    data_dir = './data/ADSB_data_arr' if df_ls is arr_dep[0] else './data/ADSB_data_dep'
+    if not os.path.exists(data_dir):
+        os.mkdir(data_dir)
+    with open(data_dir + '/x_train.pkl', 'wb') as f:
+        pickle.dump(train_data, f)
+    with open(data_dir + '/x_test.pkl', 'wb') as f:
+        pickle.dump(test_data, f)
+    with open(data_dir + '/traj_train.pkl', 'wb') as f:
+        pickle.dump(train_traj, f)
+    with open(data_dir + '/traj_test.pkl', 'wb') as f:
+        pickle.dump(test_traj, f)
+
+    fig, axs = plt.subplots(6, figsize=(10, 15))
+    # x plots from test_traj
+    for i in range(3):
+        axs[i].plot(np.arange(target_length-1), test_traj[:, i, :].T)
+        axs[i].set_ylabel('X' if i == 0 else 'Y' if i == 1 else 'Z')
+
+    # unit vector plot from test_data
+    for i in range(3):
+        axs[i + 3].plot(np.arange(target_length-1), test_data[:, i, :].T)
+        axs[i + 3].set_ylabel('U_X' if i == 0 else 'U_Y' if i == 1 else 'U_Z')
+
+    plt.tight_layout()
+
+    # save figure
+    fig.savefig(data_dir + '/sample_plot.png')
+
+    # 2D topview plot
+    fig, axs = plt.subplots(1, figsize=(10, 10))
+    axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T)
+    axs.set_xlabel('X')
+    axs.set_ylabel('Y')
+    plt.tight_layout()
+
+    fig.savefig(data_dir + '/sample_plot_2D.png')

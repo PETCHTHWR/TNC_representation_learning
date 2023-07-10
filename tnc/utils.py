@@ -128,6 +128,76 @@ def track_encoding(sample, label, encoder, window_size, path, sliding_gap=5):
     plt.savefig(os.path.join("./plots/%s" % path, "embedding_trajectory.pdf"))
 
 
+def track_encoding_ADSB(sample, traj, encoder, window_size, path, idx, sliding_gap=5):
+    T = sample.shape[-1]
+    windows_label = []
+    encodings = []
+    device = 'cuda'
+    encoder.to(device)
+    encoder.eval()
+    for t in range(window_size//2,T-window_size//2,sliding_gap):
+        windows = sample[:, t-(window_size//2):t+(window_size//2)]
+        encodings.append(encoder(torch.Tensor(windows).unsqueeze(0).to(device)).view(-1,))
+    for t in range(window_size//(2*sliding_gap)):
+        # fix offset
+        encodings.append(encodings[-1])
+        encodings.insert(0, encodings[0])
+    encodings = torch.stack(encodings, 0)
+
+    f, axs = plt.subplots(3, figsize=(20, 20), gridspec_kw={'height_ratios': [2, 1, 1]})  # Increase the width and height
+
+    # Plot the first subplot as a line plot
+    axs[0].plot(traj[0, :], traj[1, :])  # Use line plot
+    axs[0].set_xlabel('X', fontsize=22)
+    axs[0].set_ylabel('Y', fontsize=22)
+    axs[0].set_title('Airport Trajectory', fontsize=30, fontweight='bold')
+    axs[0].tick_params(axis='both', labelsize=22)
+    axs[0].set_aspect('equal')
+    axs[0].set_xlim(-170000, 170000) # Set x-axis limits
+    axs[0].set_ylim(-170000, 25000) # Set aspect ratio to make it square
+
+    # Plot the second subplot as a line plot
+    for feat in range(min(sample.shape[0], 5)):
+        axs[1].plot(np.arange(sample.shape[1]), sample[feat])
+    axs[1].set_title('Time series of Flight Path Cosine Vector', fontsize=30, fontweight='bold')
+    axs[1].set_xlabel('Time', fontsize=22)
+    axs[1].set_ylabel('Value', fontsize=22)
+    axs[1].tick_params(axis='both', labelsize=22)
+    axs[1].grid(False)
+    axs[1].set_aspect('auto')
+
+    # Plot the third subplot as a heatmap
+    sns.heatmap(encodings.detach().cpu().numpy().T, cbar=False, linewidth=0.5, ax=axs[2], linewidths=0.05,
+                xticklabels=False)
+    axs[2].set_title('Encoding Trajectory', fontsize=30, fontweight='bold')
+    axs[2].set_ylabel('Encoding dimensions', fontsize=28)
+    axs[2].tick_params(axis='both', labelsize=22)
+    axs[2].set_aspect('auto')
+
+    f.tight_layout()
+
+    # Save the figure
+    plt.savefig(os.path.join("./plots/%s" % path, f"embedding_trajectory_hm_{idx}.png"))
+
+    # windows = np.split(sample[:, :window_size * (T // window_size)], (T // window_size), -1)
+    # windows = torch.Tensor(np.stack(windows, 0)).to(encoder.device)
+    # windows_label = np.split(label[:window_size * (T // window_size)], (T // window_size), -1)
+    # windows_label = torch.Tensor(np.mean(np.stack(windows_label, 0), -1 ) ).to(encoder.device)
+    # encoder.to(encoder.device)
+    # encodings = encoder(windows)
+
+    pca = PCA(n_components=2)
+    embedding = pca.fit_transform(encodings.detach().cpu().numpy())
+    d = {'f1':embedding[:,0], 'f2':embedding[:,1], 'time':np.arange(len(embedding))}#, 'label':windows_label}
+    df = pd.DataFrame(data=d)
+    fig, ax = plt.subplots()
+    ax.set_title("Trajectory")
+    # sns.jointplot(x="f1", y="f2", data=df, kind="kde", size='time', hue='label')
+    sns.scatterplot(x="f1", y="f2", data=df, hue="time")
+    # Saving the plot
+    plt.savefig(os.path.join("./plots/%s" % path, f"embedding_trajectory_{idx}.png"))
+
+
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
     checkpoint = torch.load('./ckpt/%s/checkpoint_%d.pth.tar'%(path, cv))
     encoder.load_state_dict(checkpoint['encoder_state_dict'])
