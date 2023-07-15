@@ -59,6 +59,15 @@ def interpolate(df, periods=200):
     df = df.reindex(desired_index)
     return df
 
+def resample(df, freq='1s'):
+    """
+    Resample the trajectory to a given frequency
+    :param df: pandas dataframe to be resampled
+    :param freq: frequency, default '1s'
+    :return: pandas dataframe
+    """
+    df = df.resample(freq).mean()
+    return df
 
 def clip(df, max_range):
     """
@@ -99,7 +108,7 @@ def normalize(df, max_range):
     return df
 
 
-def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, max_range_y=100, alt_column='geoaltitude'):
+def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, alt_column='geoaltitude'):
     """
     Preprocess the trajectory
     :param df: pandas dataframe containing columns 'lat', 'lon', alt_column
@@ -119,10 +128,11 @@ def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, 
         df_new = geoprojection(df_new, ref_lat, ref_lon, ref_alt)
     else:
         df_new = baroprojection(df_new, ref_lat, ref_lon, ref_alt)
-    df_new = rectclip(df_new, max_range_x, max_range_y)
+    #df_new = rectclip(df_new, max_range_x, max_range_y)
+    df_new = clip(df_new, max_range_x)
     if len(df_new) == 0:
         return None
     df_new = smooth(df_new)
     df_new = interpolate(df_new, periods=periods)
-    #df_new = normalize(df_new, max_range)
+    #df_new = normalize(df_new, max_range_x)
     return df_new
