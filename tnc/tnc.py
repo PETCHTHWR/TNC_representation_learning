@@ -99,7 +99,7 @@ class TNCDataset(data.Dataset):
             self.delta = 5*self.epsilon*self.window_size
 
         ## Random from a Gaussian
-        t_p = [int(t+np.random.randn()*self.epsilon*self.window_size) for F in range(self.mc_sample_size)]
+        t_p = [int(t+np.random.randn()*self.epsilon*self.window_size) for _ in range(self.mc_sample_size)]
         t_p = [max(self.window_size//2+1,min(t_pp,T-self.window_size//2)) for t_pp in t_p]
         x_p = torch.stack([x[:, t_ind-self.window_size//2:t_ind+self.window_size//2] for t_ind in t_p])
         return x_p

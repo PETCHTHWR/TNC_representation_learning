@@ -88,7 +88,7 @@ def filter_squawk_repeating(df):
             return df.loc[:idx - 1]  # Select the rows before the first row with time difference greater than 90
 
 
-def check_eligible(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_rad, alt_col='geoaltitude', max_range=100):
+def check_eligible(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_rad, alt_col='geoaltitude'):
     """
     :param df:
     :param min_FAF_baro:
@@ -134,11 +134,6 @@ def check_eligible(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_
         return False
     elif distance.great_circle((ad_lat, ad_lon), (
     df.loc[df[alt_col].idxmin()]['lat'], df.loc[df[alt_col].idxmin()]['lon'])).nm > app_sector_rad:
-        return False
-    elif distance.great_circle((ad_lat, ad_lon),
-            (df.iloc[0]['lat'], df.iloc[0]['lon'])).km < max_range \
-            and distance.great_circle((ad_lat, ad_lon),
-            (df.iloc[-1]['lat'], df.iloc[-1]['lon'])).km < max_range:
         return False
     else:
         return True
