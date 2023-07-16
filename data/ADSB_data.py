@@ -23,7 +23,6 @@ def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
     norms = np.sqrt((diff_df**2).sum(axis=1)) # Calculate the norm of each difference vector
     unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
     unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
-    unit_df['r'] = norms # Store the norms in unit_df as 'r'
     return unit_df
 
 def is_smooth(df, threshold):
@@ -47,10 +46,7 @@ def is_smooth(df, threshold):
 
     # Check if any direction change exceeds the threshold
     if cp.max(direction_changes) <= threshold:
-        if df['r'].max() <= 500:
-            return True
-        else:
-            return False
+        return True
     else:
         return False
 
@@ -87,9 +83,9 @@ def normalize_fourth(train_data, test_data):
 db_url = 'mysql://lics:aelics070@143.248.69.46:13306/atfm_new'
 id_tab = 'flight'
 ADSB_tab = 'trajectory'
-too_short = 500
+too_short = 1000
 too_long = 3000
-sample_size = 1200
+sample_size = 30000
 
 # Filtering parameters
 icn_lat, icn_lon, icn_alt = 37.49491667, 126.43033333, 8.0
@@ -100,7 +96,7 @@ max_cutoff_range = 150 # kilometers
 
 # Preprocessing parameters
 target_length = 2000 + 1
-data_size = 100
+data_size = 2000
 
 ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
 ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().sample(n=sample_size)
@@ -143,7 +139,7 @@ for ADSB in [ADSB_arr, ADSB_dep]:
             continue
 
         unit_df = calculate_unit_vectors(flt_df)
-        if not is_smooth(unit_df, 60):
+        if not is_smooth(unit_df, 40):
             num_reject += 1
             continue
 
@@ -162,13 +158,13 @@ for df_ls in arr_dep:
 
     random.seed(42)  # Set a common seed value for consistent sampling
 
-    flt_traj_and_path_ls = [df.dropna().T.to_numpy() for df in df_ls if df.iloc[:, -4:].dropna(how='all').T.shape == (4, target_length-1)]
+    flt_traj_and_path_ls = [df.dropna().T.to_numpy() for df in df_ls if df.iloc[:, -3:].dropna(how='all').T.shape == (3, target_length-1)]
     sampled_data = random.sample(flt_traj_and_path_ls, data_size)
 
     flt_traj_ls = [data[:3, :] for data in sampled_data]
     flt_traj_array = np.stack(flt_traj_ls, axis=0)
 
-    flt_path_ls = [data[-4:, :] for data in sampled_data]
+    flt_path_ls = [data[-3:, :] for data in sampled_data]
     flt_path_array = np.stack(flt_path_ls, axis=0)
     n_train = int(len(flt_path_array) * 0.8)
     train_data = flt_path_array[:n_train]
@@ -176,7 +172,7 @@ for df_ls in arr_dep:
     train_traj = flt_traj_array[:n_train]
     test_traj = flt_traj_array[n_train:]
 
-    train_data, test_data = normalize_fourth(train_data, test_data)
+    #train_data, test_data = normalize_fourth(train_data, test_data)
 
     print("Data for Arrival" if df_ls is arr_dep[0] else "Data for Departure")
     print("Flight Path Dataset Shape ====> \tTrainset: ", train_data.shape, "\tTestset: ", test_data.shape)
@@ -195,7 +191,7 @@ for df_ls in arr_dep:
     with open(data_dir + '/traj_test.pkl', 'wb') as f:
         pickle.dump(test_traj, f)
 
-    fig, axs = plt.subplots(7, figsize=(10, 15))
+    fig, axs = plt.subplots(6, figsize=(10, 15))
     # x plots from test_traj
     for i in range(3):
         axs[i].plot(np.arange(target_length-1), test_traj[:, i, :].T)
@@ -207,15 +203,15 @@ for df_ls in arr_dep:
         axs[i + 3].set_ylabel('U_X' if i == 0 else 'U_Y' if i == 1 else 'U_Z')
 
     # Plot norm
-    axs[6].plot(np.arange(target_length-1), test_data[:, 3, :].T)
-    axs[6].set_ylabel('Distance between points')
+    #axs[6].plot(np.arange(target_length-1), test_data[:, 3, :].T)
+    #axs[6].set_ylabel('Distance between points')
     plt.tight_layout()
 
     # save figure
     fig.savefig(data_dir + '/sample_plot.png')
 
     # 2D topview plot
-    fig, axs = plt.subplots(1, figsize=(10, 5))
+    fig, axs = plt.subplots(1, figsize=(10, 8))
     axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T)
     axs.set_xlabel('X')
     axs.set_ylabel('Y')
