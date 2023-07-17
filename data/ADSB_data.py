@@ -8,47 +8,8 @@ import pickle
 from tqdm import tqdm
 import connectorx as cx
 from atfm.preprocess import preprocess
-from atfm.utils import check_eligible
+from atfm.utils import check_eligible, calculate_unit_vectors, is_smooth, calculate_bearing
 from sklearn.preprocessing import MinMaxScaler
-
-def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate the unit vectors of the trajectory DataFrame.
-    Input:
-        flt_df: A DataFrame containing the trajectory data of a single flight.
-    Output:
-        unit_df: A DataFrame containing the unit vectors of the trajectory.
-    """
-    diff_df = flt_df.diff().dropna() # Create a new DataFrame for the differences
-    norms = np.sqrt((diff_df**2).sum(axis=1)) # Calculate the norm of each difference vector
-    unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
-    unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
-    return unit_df
-
-def is_smooth(df, threshold):
-    """
-    Check if the trajectory is smooth.
-    Input:
-        df: A DataFrame containing the unit vectors of the trajectory.
-        threshold: The maximum allowed change in direction angle.
-    Output:
-        True if the trajectory is smooth, False otherwise.
-    """
-
-    # Convert the unit vector columns to a numpy array
-    unit_vectors = df[['u_x', 'u_y', 'u_z']].values
-    # Calculate the dot product between consecutive unit vectors
-    dot_products = cp.einsum('ij, ij->i', unit_vectors[:-1], unit_vectors[1:])
-    # Calculate the change in direction angles
-    direction_changes = cp.arccos(np.clip(dot_products, -1.0, 1.0)) * 180 / cp.pi
-    # Apply modulo operation to keep angles within 360 degrees
-    direction_changes = direction_changes % 360
-
-    # Check if any direction change exceeds the threshold
-    if cp.max(direction_changes) <= threshold:
-        return True
-    else:
-        return False
 
 def normalize_fourth(train_data, test_data):
     """Normalize only the fourth feature in the train and test data arrays using MinMaxScaler"""
@@ -83,9 +44,9 @@ def normalize_fourth(train_data, test_data):
 db_url = 'mysql://lics:aelics070@143.248.69.46:13306/atfm_new'
 id_tab = 'flight'
 ADSB_tab = 'trajectory'
-too_short = 1000
+too_short = 500
 too_long = 3000
-sample_size = 30000
+sample_size = 55000
 
 # Filtering parameters
 icn_lat, icn_lon, icn_alt = 37.49491667, 126.43033333, 8.0
@@ -93,20 +54,20 @@ min_alt_change = 2000 / 3.281 # meters
 min_FAF_baro = 1600 / 3.281 # meters
 app_sector_rad = 25 # nautical miles
 max_cutoff_range = 150 # kilometers
-
+undersampling_rate = 0.7
 # Preprocessing parameters
 target_length = 2000 + 1
 data_size = 2000
 
 ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
-ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().sample(n=sample_size)
+ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=sample_size)
 ADSB_arr = cx.read_sql(db_url, f"SELECT * FROM %s WHERE flight_id IN ({', '.join(map(str, ids_arr.values.T.tolist()[0]))});" % (ADSB_tab), return_type="arrow")
 ADSB_arr = ADSB_arr.to_pandas(split_blocks=False, date_as_object=False).dropna()
 ADSB_arr['time'] = pd.to_datetime(ADSB_arr['time'], unit='s')
 print('Total Arrival :', ids_arr.shape[0])
 
 ids_dep = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=0" % (id_tab, too_short, too_long), return_type="arrow")
-ids_dep = ids_dep.to_pandas(split_blocks=False, date_as_object=False).dropna().sample(n=sample_size)
+ids_dep = ids_dep.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=sample_size)
 ADSB_dep = cx.read_sql(db_url, f"SELECT * FROM %s WHERE flight_id IN ({', '.join(map(str, ids_dep.values.T.tolist()[0]))});" % (ADSB_tab), return_type="arrow")
 ADSB_dep = ADSB_dep.to_pandas(split_blocks=False, date_as_object=False).dropna()
 ADSB_dep['time'] = pd.to_datetime(ADSB_dep['time'], unit='s')
@@ -117,6 +78,8 @@ arr_dep = []
 for ADSB in [ADSB_arr, ADSB_dep]:
     num_reject = 0
     df_ls = []
+    arrival = True if ADSB is ADSB_arr else False
+
     for id in tqdm(set(ADSB['flight_id'].values.tolist())):
 
         flt_df = ADSB.loc[ADSB['flight_id'] == id]
@@ -138,8 +101,19 @@ for ADSB in [ADSB_arr, ADSB_dep]:
             num_reject += 1
             continue
 
+        if arrival: # Perform undersampling
+            if calculate_bearing(flt_df.iloc[0]['x'], flt_df.iloc[0]['y']) > 120 or calculate_bearing(flt_df.iloc[0]['x'], flt_df.iloc[0]['y']) < 300:
+                if np.random.choice([True, False], p=[undersampling_rate, 1-undersampling_rate]):
+                    num_reject += 1
+                    continue
+        else:
+            if calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y']) > 240 and calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y']) < 300:
+                if np.random.choice([True, False], p=[undersampling_rate, 1-undersampling_rate]):
+                    num_reject += 1
+                    continue
+
         unit_df = calculate_unit_vectors(flt_df)
-        if not is_smooth(unit_df, 40):
+        if not is_smooth(unit_df, 60):
             num_reject += 1
             continue
 

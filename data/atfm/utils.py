@@ -7,7 +7,8 @@ from tqdm import tqdm
 import pymap3d as pm
 from functools import wraps
 from time import time
-
+import cupy as cp
+import pandas as pd
 
 def latlon_to_xy(lat, lon, ref_lat, ref_lon):
     """
@@ -202,3 +203,55 @@ def timeit(f):
         print('func:%r took: %2.4f sec' % (f.__name__, te-ts))
         return result
     return wrap
+
+def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate the unit vectors of the trajectory DataFrame.
+    Input:
+        flt_df: A DataFrame containing the trajectory data of a single flight.
+    Output:
+        unit_df: A DataFrame containing the unit vectors of the trajectory.
+    """
+    diff_df = flt_df.diff().dropna() # Create a new DataFrame for the differences
+    norms = np.sqrt((diff_df**2).sum(axis=1)) # Calculate the norm of each difference vector
+    unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
+    unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
+    #unit_df['r'] = norms # Create a new column for the distance between consecutive points
+    return unit_df
+
+def is_smooth(df, threshold):
+    """
+    Check if the trajectory is smooth.
+    Input:
+        df: A DataFrame containing the unit vectors of the trajectory.
+        threshold: The maximum allowed change in direction angle.
+    Output:
+        True if the trajectory is smooth, False otherwise.
+    """
+
+    # Convert the unit vector columns to a numpy array
+    unit_vectors = df[['u_x', 'u_y', 'u_z']].values
+    # Calculate the dot product between consecutive unit vectors
+    dot_products = cp.einsum('ij, ij->i', unit_vectors[:-1], unit_vectors[1:])
+    # Calculate the change in direction angles
+    direction_changes = cp.arccos(np.clip(dot_products, -1.0, 1.0)) * 180 / cp.pi
+    # Apply modulo operation to keep angles within 360 degrees
+    direction_changes = direction_changes % 360
+
+    # Check if any direction change exceeds the threshold
+    if cp.max(direction_changes) <= threshold:
+        return True
+    else:
+        return False
+
+def calculate_bearing(x, y):
+    # Calculate the bearing angle
+    bearing_rad = np.arctan2(x, y)
+
+    # Convert the bearing angle from radians to degrees
+    bearing_deg = np.degrees(bearing_rad)
+
+    # Adjust the bearing angle to be in the range [0, 360)
+    bearing_deg = (bearing_deg + 360) % 360
+
+    return bearing_deg
