@@ -1,6 +1,6 @@
 import pandas as pd
 from .utils import latlon_to_xy, latlonalt_to_xyz
-
+from scipy.signal import savgol_filter
 
 def baroprojection(df, ref_lat, ref_lon, ref_alt):
     """
@@ -44,6 +44,22 @@ def smooth(df):
     df['z'] = df['z'].rolling(5, center=True, min_periods=1).median()
     return df
 
+def smooth_savgol(df, window_size=7, order=2):
+    """
+    Smooth the trajectory using Savitzky-Golay filter
+    :param df: pandas DataFrame containing columns 'x', 'y', 'z'
+    :param window_size: size of the smoothing window
+    :param order: order of the polynomial
+    :return: pandas DataFrame
+    """
+    smoothed_df = df.copy()
+
+
+    smoothed_df['x'] = savgol_filter(df['x'].values, window_size, order)
+    smoothed_df['y'] = savgol_filter(df['y'].values, window_size, order)
+    smoothed_df['z'] = savgol_filter(df['z'].values, int(window_size * 4 + 1), order)
+
+    return smoothed_df
 
 # @timeit
 def interpolate(df, periods=200):
@@ -132,7 +148,9 @@ def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, 
     df_new = clip(df_new, max_range_x)
     if len(df_new) == 0:
         return None
-    df_new = smooth(df_new)
+
     df_new = interpolate(df_new, periods=periods)
+    df_new = smooth_savgol(df_new)
+
     #df_new = normalize(df_new, max_range_x)
     return df_new

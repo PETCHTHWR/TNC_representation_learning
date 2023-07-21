@@ -10,6 +10,7 @@ from time import time
 import cupy as cp
 import pandas as pd
 
+
 def latlon_to_xy(lat, lon, ref_lat, ref_lon):
     """
     Convert (lat, lon) to (x, y)
@@ -144,6 +145,30 @@ def check_eligible(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_
     else:
         return True
 
+def check_eligible_cupy(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_rad, alt_col='geoaltitude', max_range=100):
+    df_array = cp.asarray(df)
+    alt_col_index = df.columns.get_loc(alt_col)
+    lat_col_index = df.columns.get_loc('lat')
+    lon_col_index = df.columns.get_loc('lon')
+
+    if df_array.size == 0:
+        return False
+    elif df_array[0, alt_col_index] == df_array[-1, alt_col_index]:
+        return False
+    elif cp.amax(df_array[:, alt_col_index]) - cp.amin(df_array[:, alt_col_index]) < min_alt_change:
+        return False
+    elif cp.amin(df_array[:, alt_col_index]) > min_FAF_baro:
+        return False
+    elif cp.amax(df_array[:, alt_col_index]) < min_FAF_baro:
+        return False
+    elif distance.great_circle((ad_lat, ad_lon),
+                               (df_array[cp.argmin(df_array[:, alt_col_index]), lat_col_index], df_array[cp.argmin(df_array[:, alt_col_index]), lon_col_index])).nm > app_sector_rad:
+        return False
+    elif distance.great_circle((ad_lat, ad_lon), (df_array[0, lat_col_index], df_array[0, lon_col_index])).km < max_range \
+            and distance.great_circle((ad_lat, ad_lon), (df_array[-1, lat_col_index], df_array[-1, lon_col_index])).km < max_range:
+        return False
+    else:
+        return True
 
 def traj_unpack(traj):
     """

@@ -1,6 +1,7 @@
 import os
 import pickle
 import numpy as np
+import cupy as cp
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -198,6 +199,37 @@ def track_encoding_ADSB(sample, traj, encoder, window_size, path, idx, sliding_g
     plt.savefig(os.path.join("./plots/%s" % path, f"embedding_trajectory_{idx}.png"))
 
 
+def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
+    T = sample.shape[-1]
+    windows_label = []
+    encodings = []
+    device = 'cuda'
+    encoder.to(device)
+    encoder.eval()
+    for t in range(window_size//2,T-window_size//2,sliding_gap):
+        windows = sample[:, t-(window_size//2):t+(window_size//2)]
+        encodings.append(encoder(torch.Tensor(windows).unsqueeze(0).to(device)).view(-1,))
+    for t in range(window_size//(2*sliding_gap)):
+        # fix offset
+        encodings.append(encodings[-1])
+        encodings.insert(0, encodings[0])
+    encodings = torch.stack(encodings, 0)
+    return encodings.detach().cpu().numpy().T
+
+def plot_TSNE(sample, encoder, window_size, path, sliding_gap=5):
+    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in range(sample.shape[0])]).reshape((sample.shape[0], -1))
+
+    # Perform t-SNE
+    tsne = TSNE(n_components=2, random_state=0)
+    tsne_results = tsne.fit_transform(enc_traj)
+
+    fig, ax = plt.subplots()
+    ax.set_title("t-SNE Plot")
+    ax.scatter(tsne_results[:, 0], tsne_results[:, 1])
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    plt.savefig(os.path.join("./plots/%s" % path, "tsne.png"))
+
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
     checkpoint = torch.load('./ckpt/%s/checkpoint_%d.pth.tar'%(path, cv))
     encoder.load_state_dict(checkpoint['encoder_state_dict'])
@@ -316,3 +348,66 @@ def trend_decompose(x, filter_size):
     axs.plot(x[0,:-filter_size+1], c='blue')
     plt.show()
 
+
+# Function to rotate vectors
+def rotate_3D(vector, angle_degrees_z, angle_degrees_x):
+    theta_z = np.radians(angle_degrees_z)
+    theta_x = np.radians(angle_degrees_x)
+    rotation_matrix_z = np.array([[np.cos(theta_z), np.sin(theta_z), 0],
+                                  [-np.sin(theta_z), np.cos(theta_z), 0],
+                                  [0, 0, 1]])
+    rotation_matrix_x = np.array([[1, 0, 0],
+                                  [0, np.cos(theta_x), np.sin(theta_x)],
+                                  [0, -np.sin(theta_x), np.cos(theta_x)]])
+    rotated_vector = np.dot(rotation_matrix_z, vector)
+    rotated_vector = np.dot(rotation_matrix_x, rotated_vector)
+    return rotated_vector
+
+def rotate_3D_cuda(vector, angle_degrees_z, angle_degrees_x):
+    vector = cp.asarray(vector)
+    theta_z = cp.radians(angle_degrees_z)
+    theta_x = cp.radians(angle_degrees_x)
+    cz = float(cp.cos(theta_z))
+    sz = float(cp.sin(theta_z))
+    cx = float(cp.cos(theta_x))
+    sx = float(cp.sin(theta_x))
+    rotation_matrix_z = cp.array([[cz, sz, 0],
+                                  [-sz, cz, 0],
+                                  [0, 0, 1]])
+    rotation_matrix_x = cp.array([[1, 0, 0],
+                                  [0, cx, sx],
+                                  [0, -sx, cx]])
+    rotated_vector = cp.dot(rotation_matrix_z, vector)
+    rotated_vector = cp.dot(rotation_matrix_x, rotated_vector)
+    return rotated_vector.get()
+
+def augment_with_offset(vector, off_x, off_y, off_z):
+    offset = torch.stack([off_x, off_y, off_z], dim=0).to(vector.device)
+    augmented_vector = vector + offset
+    augmented_vector /= torch.linalg.norm(augmented_vector)
+    return augmented_vector
+
+def augment_with_rotation(vectors, angle_degrees_z, angle_degrees_x):
+    # Convert the angles to radians
+    theta_z = torch.deg2rad(angle_degrees_z)
+    theta_x = torch.deg2rad(angle_degrees_x)
+
+    # Calculate the sine and cosine values of the angles
+    cz = torch.cos(theta_z)
+    sz = torch.sin(theta_z)
+    cx = torch.cos(theta_x)
+    sx = torch.sin(theta_x)
+
+    # Define the rotation matrices
+    rotation_matrix_z = torch.tensor([[cz, -sz, 0],
+                                      [sz, cz, 0],
+                                      [0, 0, 1]], dtype=vectors.dtype, device=vectors.device)
+    rotation_matrix_x = torch.tensor([[1, 0, 0],
+                                      [0, cx, -sx],
+                                      [0, sx, cx]], dtype=vectors.dtype, device=vectors.device)
+
+    # Apply the rotation using matrix multiplication
+    rotated_vectors = torch.matmul(rotation_matrix_z, vectors)
+    rotated_vectors = torch.matmul(rotation_matrix_x, rotated_vectors)
+
+    return rotated_vectors

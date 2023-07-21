@@ -8,14 +8,14 @@ import pickle
 from tqdm import tqdm
 import connectorx as cx
 from atfm.preprocess import preprocess
-from atfm.utils import check_eligible, calculate_unit_vectors, is_smooth, calculate_bearing
+from atfm.utils import check_eligible, calculate_unit_vectors, is_smooth, calculate_bearing, check_eligible_cupy
 from sklearn.preprocessing import MinMaxScaler
 
 def normalize_fourth(train_data, test_data):
     """Normalize only the fourth feature in the train and test data arrays using MinMaxScaler"""
 
     # Create a MinMaxScaler object
-    scaler = MinMaxScaler(feature_range=(-0.5, 0.5))
+    scaler = MinMaxScaler(feature_range=(-1, 1))
 
     # Reshape the fourth feature of train data to 2D (samples, length)
     train_fourth_feature = np.reshape(train_data[:, 3, :], (train_data.shape[0], -1))
@@ -46,18 +46,20 @@ id_tab = 'flight'
 ADSB_tab = 'trajectory'
 too_short = 500
 too_long = 3000
-sample_size = 55000
+sample_size = 50000
 
 # Filtering parameters
 icn_lat, icn_lon, icn_alt = 37.49491667, 126.43033333, 8.0
 min_alt_change = 2000 / 3.281 # meters
-min_FAF_baro = 1600 / 3.281 # meters
-app_sector_rad = 25 # nautical miles
+FAF = 1600 / 3.281 # meters
+app_sec_rad = 25 # nautical miles
 max_cutoff_range = 150 # kilometers
-undersampling_rate = 0.7
+allowed_cutoff_error = 25 # kilometers
+max_angle_change = 60 # degrees
+
 # Preprocessing parameters
 target_length = 2000 + 1
-data_size = 2000
+data_size = 1000
 
 ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
 ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=sample_size)
@@ -77,51 +79,74 @@ print('Total Departure :', ids_dep.shape[0])
 arr_dep = []
 for ADSB in [ADSB_arr, ADSB_dep]:
     num_reject = 0
+    num_dump = 0
     df_ls = []
     arrival = True if ADSB is ADSB_arr else False
 
     for id in tqdm(set(ADSB['flight_id'].values.tolist())):
 
-        flt_df = ADSB.loc[ADSB['flight_id'] == id]
-        flt_df = flt_df.set_index('time')
+        flt_df = ADSB.loc[ADSB['flight_id'] == id] # flight dataframe
+        flt_df = flt_df.set_index('time') # set time as index
 
-        if not check_eligible(flt_df, min_alt_change, min_FAF_baro, icn_lat, icn_lon, app_sector_rad, alt_col='baroaltitude', max_range=max_cutoff_range):
+        # check if the flight is eligible
+        if not check_eligible_cupy(flt_df, min_alt_change, FAF, icn_lat, icn_lon, app_sec_rad, alt_col='baroaltitude', max_range=max_cutoff_range):
             num_reject += 1
             continue
 
+        # preprocess the flight
         try:
-            flt_df = flt_df.dropna()
+            flt_df = flt_df.dropna() # drop nan values
             flt_df = preprocess(flt_df, ref_lat=icn_lat, ref_lon=icn_lon, ref_alt=icn_alt, periods=target_length,
-                                max_range_x=max_cutoff_range, alt_column='baroaltitude')
-        except Exception:
+                                max_range_x=max_cutoff_range, alt_column='baroaltitude') # preprocess
+        except Exception: # if preprocessing fails
+            print('Preprocessing failed')
             num_reject += 1
             continue
 
-        if np.max(np.linalg.norm(flt_df[['x', 'y']].values, axis=1)) < (max_cutoff_range * 1000) - 500:
+        # Confirm that the flight is not too short
+        if np.max(np.linalg.norm(flt_df[['x', 'y']].values, axis=1)) < (max_cutoff_range - allowed_cutoff_error) * 1000:
             num_reject += 1
             continue
 
-        if arrival: # Perform undersampling
-            if calculate_bearing(flt_df.iloc[0]['x'], flt_df.iloc[0]['y']) > 120 or calculate_bearing(flt_df.iloc[0]['x'], flt_df.iloc[0]['y']) < 300:
-                if np.random.choice([True, False], p=[undersampling_rate, 1-undersampling_rate]):
-                    num_reject += 1
+        north_bearing = calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y'])
+        if arrival:
+            undersampling_rate = 0.8 # Perform undersampling on southbound and south-eastbound flights
+            if north_bearing > 120 and north_bearing < 210:
+                if np.random.choice([True, False], p=[undersampling_rate, 1 - undersampling_rate]):
+                    num_dump += 1
                     continue
         else:
-            if calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y']) > 240 and calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y']) < 300:
-                if np.random.choice([True, False], p=[undersampling_rate, 1-undersampling_rate]):
-                    num_reject += 1
+            undersampling_rate = 0.7 # Perform undersampling on southbound flights
+            if north_bearing > 150 and north_bearing < 210:
+                if np.random.choice([True, False], p=[undersampling_rate, 1 - undersampling_rate]):
+                    num_dump += 1
                     continue
 
+        if arrival:
+            undersampling_rate = 0.9 # Perform undersampling on other flights except for eastbound flights
+            if north_bearing > 120 and north_bearing < 360:
+                if np.random.choice([True, False], p=[undersampling_rate, 1 - undersampling_rate]):
+                    num_dump += 1
+                    continue
+        else:
+            undersampling_rate = 0.7 # Perform undersampling on other flights except for westbound flights
+            if north_bearing > 0 and north_bearing < 210:
+                if np.random.choice([True, False], p=[undersampling_rate, 1 - undersampling_rate]):
+                    num_dump += 1
+                    continue
+
+        # Calculate unit vectors
         unit_df = calculate_unit_vectors(flt_df)
-        if not is_smooth(unit_df, 60):
+        if not is_smooth(unit_df, max_angle_change):
             num_reject += 1
             continue
 
-        joined_df = pd.concat([flt_df, unit_df], axis=1)
-        joined_df[unit_df.columns] = joined_df[unit_df.columns].shift(-1)
-        df_ls.append(joined_df)
+        joined_df = pd.concat([flt_df, unit_df], axis=1) # join the dataframes
+        joined_df[unit_df.columns] = joined_df[unit_df.columns].shift(-1) # shift the unit vectors by 1
+        df_ls.append(joined_df) # append the dataframe
 
-    print('Rejected %d flights' % num_reject)
+    print('Rejected %d flights' % num_reject) # print the number of rejected flights
+    print('Dumped %d flights' % num_dump) # print the number of dumped flights
     arr_dep.append(df_ls) # arr_dep[0] is arrival, arr_dep[1] is departure
 
 for df_ls in arr_dep:
@@ -185,8 +210,12 @@ for df_ls in arr_dep:
     fig.savefig(data_dir + '/sample_plot.png')
 
     # 2D topview plot
-    fig, axs = plt.subplots(1, figsize=(10, 8))
+    fig, axs = plt.subplots(1, figsize=(10, 10))
     axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T)
+
+    # Draw a circle with radius of max_cutoff_range
+    circle = plt.Circle((0, 0), max_cutoff_range, color='r', fill=False)
+    axs.add_artist(circle)
     axs.set_xlabel('X')
     axs.set_ylabel('Y')
     axs.grid(True)
@@ -194,3 +223,14 @@ for df_ls in arr_dep:
     plt.tight_layout()
 
     fig.savefig(data_dir + '/sample_plot_2D.png')
+
+    # 2D topview plot with training data
+    fig, axs = plt.subplots(1, figsize=(10, 10))
+    axs.plot(train_traj[:, 0, :].T, train_traj[:, 1, :].T)
+    axs.set_xlabel('X')
+    axs.set_ylabel('Y')
+    axs.grid(True)
+    axs.set_aspect('equal')
+    plt.tight_layout()
+
+    fig.savefig(data_dir + '/sample_plot_2D_train.png')

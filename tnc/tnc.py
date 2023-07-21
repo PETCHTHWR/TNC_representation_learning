@@ -9,14 +9,15 @@ import argparse
 import math
 import seaborn as sns; sns.set()
 import sys
-
+from tqdm import tqdm
 import numpy as np
 import pickle
 import os
 import random
+from sklearn.manifold import TSNE
 
 from tnc.models import RnnEncoder, WFEncoder
-from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB
+from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_TSNE, augment_with_offset, augment_with_rotation
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa.stattools import adfuller
 
@@ -49,7 +50,7 @@ class Discriminator(torch.nn.Module):
 
 
 class TNCDataset(data.Dataset):
-    def __init__(self, x, mc_sample_size, window_size, augmentation, epsilon=3, state=None, adf=False):
+    def __init__(self, x, mc_sample_size, window_size, augmentation, epsilon=3, state=None, adf=False, omega_x=0.2, omega_y=0.2, omega_z=0.01, psi=30, phi=5, device='cuda'):
         super(TNCDataset, self).__init__()
         self.time_series = x
         self.T = x.shape[-1]
@@ -60,6 +61,13 @@ class TNCDataset(data.Dataset):
         self.state = state
         self.augmentation = augmentation
         self.adf = adf
+        self.omega_x = omega_x
+        self.omega_y = omega_y
+        self.omega_z = omega_z
+        self.psi = psi
+        self.phi = phi
+        self.device = device
+
         if not self.adf:
             self.epsilon = epsilon
             self.delta = 5*window_size*epsilon
@@ -102,11 +110,23 @@ class TNCDataset(data.Dataset):
         t_p = [int(t+np.random.randn()*self.epsilon*self.window_size) for F in range(self.mc_sample_size)]
         t_p = [max(self.window_size//2+1,min(t_pp,T-self.window_size//2)) for t_pp in t_p]
         x_p = torch.stack([x[:, t_ind-self.window_size//2:t_ind+self.window_size//2] for t_ind in t_p])
+
+        ## Angular augmentation with offset
+        #off_x = torch.normal(0, self.omega_x, size=(x_p.shape[0],))
+        #off_y = torch.normal(0, self.omega_y, size=(x_p.shape[0],))
+        #off_z = torch.normal(0, self.omega_z, size=(x_p.shape[0],))
+        #x_p = torch.stack([torch.stack([augment_with_offset(x_p[i, :, j], off_x[i], off_y[i], off_z[i]) for j in range(x_p.shape[2])], dim=1) for i in range(x_p.shape[0])], dim=0)
+
+        ## Angular augmentation with rotation
+        z_angles = torch.normal(0, self.psi, size=(x_p.shape[0],))
+        x_angles = torch.normal(0, self.phi, size=(x_p.shape[0],))
+        x_p = torch.stack([augment_with_rotation(x_p[i, :, :], z_angles[i], x_angles[i]) for i in range(x_p.shape[0])], dim=0)
+
         return x_p
 
     def _find_non_neighours(self, x, t):
         T = self.time_series.shape[-1]
-        if t>T/2:
+        if t > T/2:
             t_n = np.random.randint(self.window_size//2, max((t - self.delta + 1), self.window_size//2+1), self.mc_sample_size)
         else:
             t_n = np.random.randint(min((t + self.delta), (T - self.window_size-1)), (T - self.window_size//2), self.mc_sample_size)
@@ -118,6 +138,18 @@ class TNCDataset(data.Dataset):
                 x_n = x[:,rand_t:rand_t+self.window_size].unsqueeze(0)
             else:
                 x_n = x[:, T - rand_t - self.window_size:T - rand_t].unsqueeze(0)
+
+        ## Angular augmentation with offset
+        #off_x = torch.normal(0, self.omega_x, size=(x_n.shape[0],))
+        #off_y = torch.normal(0, self.omega_y, size=(x_n.shape[0],))
+        #off_z = torch.normal(0, self.omega_z, size=(x_n.shape[0],))
+        #x_n = torch.stack([torch.stack([augment_with_offset(x_n[i, :, j], off_x[i], off_y[i], off_z[i]) for j in range(x_n.shape[2])], dim=1) for i in range(x_n.shape[0])], dim=0)
+
+        ## Angular augmentation with rotation
+        z_angles = torch.normal(0, self.psi, size=(x_n.shape[0],))
+        x_angles = torch.normal(0, self.phi, size=(x_n.shape[0],))
+        x_n = torch.stack([augment_with_rotation(x_n[i, :, :], z_angles[i], x_angles[i]) for i in range(x_n.shape[0])], dim=0)
+
         return x_n
 
 
@@ -174,19 +206,19 @@ def learn_encoder(x, encoder, window_size, w, lr=0.001, decay=0.005, mc_sample_s
     accuracies, losses = [], []
     for cv in range(n_cross_val):
         if 'waveform' in path:
-            encoder = WFEncoder(encoding_size=64).to(device)
+            # encoder = WFEncoder(encoding_size=64).to(device)
             batch_size = 5
         elif 'simulation' in path:
-            encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+            # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
             batch_size = 10
         elif 'ADSB_arr' in path:
-            encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+            # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device)
             batch_size = 10
         elif 'ADSB_dep' in path:
-            encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+            # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device)
             batch_size = 10
         elif 'har' in path:
-            encoder = RnnEncoder(hidden_size=100, in_channel=561, encoding_size=10, device=device)
+            # encoder = RnnEncoder(hidden_size=100, in_channel=561, encoding_size=10, device=device)
             batch_size = 10
         if not os.path.exists('./ckpt/%s'%path):
             os.mkdir('./ckpt/%s'%path)
@@ -296,8 +328,8 @@ def main(is_train, data_type, cv, w, cont):
                     print('TNC acc: %.2f \t TNC auc: %.2f \t E2E acc: %.2f \t E2E auc: %.2f'%(tnc_acc, tnc_auc, e2e_acc, e2e_auc))
 
     if data_type == 'ADSB_arr':
-        window_size = 50
-        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+        window_size = 100
+        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
         path = './data/ADSB_data_arr/'
         if is_train:
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
@@ -313,12 +345,26 @@ def main(is_train, data_type, cv, w, cont):
             checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
-            for i in range(100):
+
+            # Plot the distribution of the encoding trajectories
+            for i in range(x_test.shape[0]):
                 track_encoding_ADSB(x_test[i,:,:], traj_test[i,:,:], encoder, window_size, 'ADSB_arr', i)
+            plot_TSNE(x_test, encoder, window_size, 'ADSB_arr', sliding_gap=5)
+
+            # Plot t-sne of the original trajectories
+            traj_reshaped = x_test.reshape(x_test.shape[0], -1)
+            tsne = TSNE(n_components=2, random_state=0)
+            traj_tsne = tsne.fit_transform(traj_reshaped)
+            fig, ax = plt.subplots()
+            ax.scatter(traj_tsne[:,0], traj_tsne[:,1])
+            ax.set_title("t-SNE of the original trajectories")
+            ax.set_xlabel("Component 1")
+            ax.set_ylabel("Component 2")
+            plt.savefig(os.path.join("./plots/ADSB_arr", "traj_tsne.png"))
 
     if data_type == 'ADSB_dep':
-        window_size = 50
-        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=10, device=device)
+        window_size = 100
+        encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
         path = './data/ADSB_data_dep/'
         if is_train:
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
@@ -334,8 +380,22 @@ def main(is_train, data_type, cv, w, cont):
             checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
-            for i in range(100):
-                track_encoding_ADSB(x_test[i,:,:], traj_test[i,:,:], encoder, window_size, 'ADSB_dep', i)
+
+            # Plot the distribution of the encoding trajectories
+            for i in range(x_test.shape[0]):
+                track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_dep', i)
+            plot_TSNE(x_test, encoder, window_size, 'ADSB_dep', sliding_gap=5)
+
+            # Plot t-sne of the original trajectories
+            traj_reshaped = x_test.reshape(x_test.shape[0], -1)
+            tsne = TSNE(n_components=2, random_state=0)
+            traj_tsne = tsne.fit_transform(traj_reshaped)
+            fig, ax = plt.subplots()
+            ax.scatter(traj_tsne[:, 0], traj_tsne[:, 1])
+            ax.set_title("t-SNE of the original trajectories")
+            ax.set_xlabel("Component 1")
+            ax.set_ylabel("Component 2")
+            plt.savefig(os.path.join("./plots/ADSB_dep", "traj_tsne.png"))
 
     if data_type == 'waveform':
         window_size = 2500
@@ -404,7 +464,7 @@ if __name__ == '__main__':
     parser.add_argument('--cv', type=int, default=1)
     parser.add_argument('--w', type=float, default=0.05)
     parser.add_argument('--train', action='store_true', default=False)
-    parser.add_argument('--cont', action='store_true')
+    parser.add_argument('--cont', action='store_true', default=False)
     args = parser.parse_args()
     print('TNC model with w=%f'%args.w)
     print('Data: %s'%args.data)
