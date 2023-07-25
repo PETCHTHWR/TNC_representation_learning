@@ -269,6 +269,29 @@ def is_smooth(df, threshold):
     else:
         return False
 
+def is_flight_path_smooth(df, flight_path_threshold):
+    """
+    Check if the flight path is smooth.
+    Input:
+        df: A DataFrame containing the unit vectors of the trajectory.
+        flight_path_threshold: The maximum allowed change in flight path angle.
+    Output:
+        True if the flight path is smooth, False otherwise.
+    """
+
+    # Convert the unit vector columns to a CuPy array
+    unit_vectors = cp.asarray(df[['u_x', 'u_y', 'u_z']].values)
+
+    # Calculate the change in flight path angles (z-axis)
+    flight_path_angles = cp.arcsin(unit_vectors[:, 2]) # arcsin(z) for each unit vector
+    flight_path_changes = cp.diff(cp.unwrap(flight_path_angles)) * 180 / cp.pi
+
+    # Check if any flight path change exceeds the threshold
+    if cp.max(cp.abs(flight_path_changes)) <= flight_path_threshold:
+        return True
+    else:
+        return False
+
 def calculate_bearing(x, y):
     # Calculate the bearing angle
     bearing_rad = np.arctan2(x, y)

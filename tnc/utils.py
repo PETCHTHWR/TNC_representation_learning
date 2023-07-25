@@ -217,12 +217,21 @@ def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
     return encodings.detach().cpu().numpy().T
 
 def plot_TSNE(sample, encoder, window_size, path, sliding_gap=5):
-    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in range(sample.shape[0])]).reshape((sample.shape[0], -1))
+    # Plot t-sne of the original trajectories
+    traj_reshaped = sample.reshape(sample.shape[0], -1)
+    tsne = TSNE(n_components=2, random_state=0)
+    traj_tsne = tsne.fit_transform(traj_reshaped)
+    fig, ax = plt.subplots()
+    ax.scatter(traj_tsne[:, 0], traj_tsne[:, 1])
+    ax.set_title("t-SNE of the original trajectories")
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    plt.savefig(os.path.join("./plots/%s" % path, "traj_tsne.png"))
 
-    # Perform t-SNE
+    # Plot t-sne of the encoded trajectories
+    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in range(sample.shape[0])]).reshape((sample.shape[0], -1))
     tsne = TSNE(n_components=2, random_state=0)
     tsne_results = tsne.fit_transform(enc_traj)
-
     fig, ax = plt.subplots()
     ax.set_title("t-SNE Plot")
     ax.scatter(tsne_results[:, 0], tsne_results[:, 1])

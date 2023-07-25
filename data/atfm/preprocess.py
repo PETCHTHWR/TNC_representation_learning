@@ -1,6 +1,7 @@
 import pandas as pd
 from .utils import latlon_to_xy, latlonalt_to_xyz
 from scipy.signal import savgol_filter
+from scipy import stats
 
 def baroprojection(df, ref_lat, ref_lon, ref_alt):
     """
@@ -54,10 +55,9 @@ def smooth_savgol(df, window_size=7, order=2):
     """
     smoothed_df = df.copy()
 
-
     smoothed_df['x'] = savgol_filter(df['x'].values, window_size, order)
     smoothed_df['y'] = savgol_filter(df['y'].values, window_size, order)
-    smoothed_df['z'] = savgol_filter(df['z'].values, int(window_size * 4 + 1), order)
+    smoothed_df['z'] = savgol_filter(df['z'].values, window_size, order)
 
     return smoothed_df
 
@@ -83,6 +83,16 @@ def resample(df, freq='1s'):
     :return: pandas dataframe
     """
     df = df.resample(freq).mean()
+    return df
+
+
+def remove_outliers(df, threshold=3):
+    df = df.copy()  # To ensure we don't modify the original dataframe
+    df.loc[:, 'z_diff'] = df['z'].diff()
+    df = df.dropna()
+    df.loc[:, 'z_diff_z'] = stats.zscore(df['z_diff'])
+    df = df[df['z_diff_z'].abs() <= threshold]
+    df = df.drop(columns=['z_diff', 'z_diff_z'])
     return df
 
 def clip(df, max_range):
@@ -124,7 +134,21 @@ def normalize(df, max_range):
     return df
 
 
-def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, alt_column='geoaltitude'):
+def resample_and_trim_trajectory(df, target_length=1500):
+    # Ensure the DataFrame is sorted by the index
+    df = df.sort_index()
+
+    # Resample the dataframe to 1 second intervals
+    resampled_df = df.resample('1S').interpolate()
+
+    # If the resampled dataframe is longer than the target length, trim it
+    if len(resampled_df) > target_length:
+        resampled_df = resampled_df.iloc[:target_length]
+
+    return resampled_df
+
+def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range = 100,
+               alt_column='geoaltitude', freq='1s', zscore_threshold=3, window_size=7, order=2):
     """
     Preprocess the trajectory
     :param df: pandas dataframe containing columns 'lat', 'lon', alt_column
@@ -144,13 +168,15 @@ def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range_x = 100, 
         df_new = geoprojection(df_new, ref_lat, ref_lon, ref_alt)
     else:
         df_new = baroprojection(df_new, ref_lat, ref_lon, ref_alt)
-    #df_new = rectclip(df_new, max_range_x, max_range_y)
-    df_new = clip(df_new, max_range_x)
+
+    df_new = clip(df_new, max_range)
     if len(df_new) == 0:
         return None
 
-    df_new = interpolate(df_new, periods=periods)
-    df_new = smooth_savgol(df_new)
+    df_new = resample(df_new, freq=freq) # resample to 1s
+    df_new = remove_outliers(df_new, threshold=zscore_threshold) # remove outliers
+    df_new = interpolate(df_new, periods=periods) # interpolate to 200 points
+    df_new = smooth_savgol(df_new, window_size=window_size, order=order)
 
     #df_new = normalize(df_new, max_range_x)
     return df_new

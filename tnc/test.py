@@ -1,30 +1,49 @@
-import torch
-import torch.nn as nn
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
+from scipy.spatial.distance import euclidean
+from fastdtw import fastdtw
 
-class TransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward=2048, dropout=0.1):
-        super(TransformerEncoder, self).__init__()
-        assert d_model % nhead == 0, "embed_dim must be divisible by num_heads"
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+# Create two sequences
+# Trajectory A
+A = np.array([1, 3, 4, 9, 8, 2, 1, 5, 7, 3], dtype=float)
+# Trajectory B
+B = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=float)
 
-    def forward(self, x):
-        encodings = self.encoder(x)
-        return encodings
+# Reshape the arrays for use with fastdtw package
+A = np.reshape(A, (len(A),1))
+B = np.reshape(B, (len(B),1))
 
-# Example usage:
-d_model = 100  # Set the desired d_model
-nhead = 5  # Set the desired num_heads (should be a factor of d_model)
-dim_feedforward = 2048
-dropout = 0.1
-num_layers = 6
+# Apply DTW
+distance, path = fastdtw(A, B, dist=euclidean)
 
-transformer_encoder = TransformerEncoder(d_model, nhead, num_layers, dim_feedforward, dropout)
+print(f"DTW distance is {distance}")
+print(f"DTW path is {path}")
 
-# Input tensor with shape (batch_size, sequence_length, d_model)
-input_tensor = torch.randn(40, 3, d_model)
+# Create figure
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
 
-# Output of the Transformer Encoder
-output_tensor = transformer_encoder(input_tensor)
+# Create an index array (X-Axis)
+idx = np.array(range(max(len(A), len(B))))
 
-print(output_tensor.shape)  # Output: torch.Size([40, 3, 100])
+# Append zeros if trajectories lengths are different
+if len(A) < len(idx):
+    A = np.concatenate([A, np.zeros((len(idx) - len(A), 1))])
+if len(B) < len(idx):
+    B = np.concatenate([B, np.zeros((len(idx) - len(B), 1))])
+
+# Plot the trajectories
+ax.plot(idx, A, zs=0, zdir='z', label='A')
+ax.plot(idx, B, zs=1, zdir='z', label='B')
+
+# Plot the path - this connects points matched in both trajectories
+for p in path:
+    ax.plot([p[0], p[1]], [A[p[0]], B[p[1]]], zs=[0, 1], zdir='z', color='r')
+
+ax.set_xlabel('Index')
+ax.set_ylabel('Value')
+ax.set_zlabel('Sequence')
+plt.legend()
+
+plt.show()
