@@ -19,8 +19,7 @@ import random
 from sklearn.manifold import TSNE
 
 from tnc.models import RnnEncoder, WFEncoder, TransformerEncoder
-from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_TSNE, augment_with_offset, \
-    augment_with_rotation
+from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_TSNE, plot_traj_TSNE, augment_with_rotation
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa.stattools import adfuller
 
@@ -269,7 +268,7 @@ def learn_encoder(x, encoder, window_size, w, lr=0.001, decay=0.005, mc_sample_s
         best_acc = 0
         best_loss = np.inf
 
-        for epoch in tqdm(range(n_epochs + 1)):
+        for epoch in range(n_epochs + 1):
             trainset = TNCDataset(x=torch.Tensor(x[:n_train]), mc_sample_size=mc_sample_size,
                                   window_size=window_size, augmentation=augmentation, adf=True, psi=20, phi=5)
             train_loader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=3)
@@ -379,14 +378,15 @@ def main(is_train, data_type, cv, w, cont):
                 x_test = pickle.load(f)
             with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
                 traj_test = pickle.load(f)
-            checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
+            checkpoint = torch.load('./ckpt/%s/checkpoint_3.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
 
             # Plot the distribution of the encoding trajectories
             for i in range(x_test.shape[0]):
                 track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_arr', i, sliding_gap=25)
-            plot_TSNE(x_test, encoder, window_size, 'ADSB_arr', sliding_gap=25)
+            plot_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_arr', sliding_gap=25, n_clusters=16, max_cutoff_range=150)
+            plot_traj_TSNE(traj_test, 'ADSB_arr', n_clusters=10, max_cutoff_range=150)
 
     if data_type == 'ADSB_dep':
         window_size = 50
@@ -405,15 +405,15 @@ def main(is_train, data_type, cv, w, cont):
                 x_test = pickle.load(f)
             with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
                 traj_test = pickle.load(f)
-            checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
+            checkpoint = torch.load('./ckpt/%s/checkpoint_3.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
 
             # Plot the distribution of the encoding trajectories
             for i in range(x_test.shape[0]):
                 track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_dep', i, sliding_gap=25)
-            plot_TSNE(x_test, encoder, window_size, 'ADSB_dep', sliding_gap=25)
-
+            plot_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_dep', sliding_gap=25, n_clusters=16, max_cutoff_range=150)
+            plot_traj_TSNE(traj_test, 'ADSB_dep', n_clusters=10, max_cutoff_range=150)
 
     if data_type == 'waveform':
         window_size = 2500

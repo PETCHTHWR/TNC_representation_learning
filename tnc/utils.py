@@ -14,7 +14,7 @@ import torch
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
-
+from sklearn.cluster import KMeans
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -201,7 +201,6 @@ def track_encoding_ADSB(sample, traj, encoder, window_size, path, idx, sliding_g
 
 def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
     T = sample.shape[-1]
-    windows_label = []
     encodings = []
     device = 'cuda'
     encoder.to(device)
@@ -216,28 +215,129 @@ def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
     encodings = torch.stack(encodings, 0)
     return encodings.detach().cpu().numpy().T
 
-def plot_TSNE(sample, encoder, window_size, path, sliding_gap=5):
-    # Plot t-sne of the original trajectories
-    traj_reshaped = sample.reshape(sample.shape[0], -1)
-    tsne = TSNE(n_components=2, random_state=0)
-    traj_tsne = tsne.fit_transform(traj_reshaped)
-    fig, ax = plt.subplots()
-    ax.scatter(traj_tsne[:, 0], traj_tsne[:, 1])
-    ax.set_title("t-SNE of the original trajectories")
+def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
+    # Plot t-sne of the encoded trajectories
+    traj_reshaped = traj.reshape(traj.shape[0], -1)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_assignments = kmeans.fit_predict(traj_reshaped)
+
+    tsne = TSNE(n_components=2, random_state=42)
+    tsne_results = tsne.fit_transform(traj_reshaped)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    cmap = plt.cm.get_cmap('rainbow', n_clusters)
+    for i in range(n_clusters):
+        ax.scatter(tsne_results[cluster_assignments == i, 0],
+                   tsne_results[cluster_assignments == i, 1],
+                   label=f'Cluster {i + 1}',
+                   color=cmap(i))
+    ax.legend()
+    ax.set_title("t-SNE Plot")
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
-    plt.savefig(os.path.join("./plots/%s" % path, "traj_tsne.png"))
+    ax.set_xlim(-40, 40)
+    ax.set_ylim(-40, 40)
+    ax.set_aspect('equal')
+    plt.savefig(os.path.join("./plots/%s" % path, "ori_tsne.png"))
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for i in range(n_clusters):
+        cluster_trajectories = traj[cluster_assignments == i]
+        for trajectory in cluster_trajectories:
+            ax.plot(trajectory[0], trajectory[1], color=cmap(i), label=f'Cluster {i + 1}')
+
+            # To prevent multiple labels for each cluster in the legend
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
+    ax.add_patch(circle)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.grid(True)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+    plt.legend(by_label.values(), by_label.keys())
+    plt.savefig(os.path.join("./plots/%s" % path, "ori_traj_cluster.png"))
+
+    for i in range(n_clusters):
+        fig, ax = plt.subplots(figsize=(8, 8))
+        cluster_trajectories = traj[cluster_assignments == i]
+        for trajectory in cluster_trajectories:
+            ax.plot(trajectory[0], trajectory[1], color=cmap(i))
+
+        ax.set_title(f"Cluster {i + 1}")
+        circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
+        ax.add_patch(circle)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.grid(True)
+        ax.set_aspect('equal')
+        plt.tight_layout()
+        plt.savefig(os.path.join("./plots/%s" % path, f"ori_traj_cluster_{i + 1}.png"))
+        plt.close(fig)  # Close the figure to free up memory
+
+
+def plot_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, n_clusters=10, max_cutoff_range=150):
 
     # Plot t-sne of the encoded trajectories
     enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in range(sample.shape[0])]).reshape((sample.shape[0], -1))
-    tsne = TSNE(n_components=2, random_state=0)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_assignments = kmeans.fit_predict(enc_traj)
+
+    tsne = TSNE(n_components=2, random_state=42)
     tsne_results = tsne.fit_transform(enc_traj)
-    fig, ax = plt.subplots()
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    cmap = plt.cm.get_cmap('rainbow', n_clusters)
+    for i in range(n_clusters):
+        ax.scatter(tsne_results[cluster_assignments == i, 0],
+                   tsne_results[cluster_assignments == i, 1],
+                   label=f'Cluster {i + 1}',
+                   color=cmap(i))
+    ax.legend()
     ax.set_title("t-SNE Plot")
-    ax.scatter(tsne_results[:, 0], tsne_results[:, 1])
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
+    ax.set_xlim(-40, 40)
+    ax.set_ylim(-40, 40)
+    ax.set_aspect('equal')
     plt.savefig(os.path.join("./plots/%s" % path, "tsne.png"))
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for i in range(n_clusters):
+        cluster_trajectories = traj[cluster_assignments == i]
+        for trajectory in cluster_trajectories:
+            ax.plot(trajectory[0], trajectory[1], color=cmap(i), label=f'Cluster {i + 1}')
+
+            # To prevent multiple labels for each cluster in the legend
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
+    ax.add_patch(circle)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.grid(True)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+    plt.legend(by_label.values(), by_label.keys())
+    plt.savefig(os.path.join("./plots/%s" % path, "traj_cluster.png"))
+
+    for i in range(n_clusters):
+        fig, ax = plt.subplots(figsize=(8, 8))
+        cluster_trajectories = traj[cluster_assignments == i]
+        for trajectory in cluster_trajectories:
+            ax.plot(trajectory[0], trajectory[1], color=cmap(i))
+
+        ax.set_title(f"Cluster {i + 1}")
+        circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
+        ax.add_patch(circle)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.grid(True)
+        ax.set_aspect('equal')
+        plt.tight_layout()
+        plt.savefig(os.path.join("./plots/%s" % path, f"traj_cluster_{i + 1}.png"))
+        plt.close(fig)  # Close the figure to free up memory
 
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
     checkpoint = torch.load('./ckpt/%s/checkpoint_%d.pth.tar'%(path, cv))

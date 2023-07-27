@@ -135,7 +135,7 @@ def check_eligible(df, min_alt_change, min_FAF_baro, ad_lat, ad_lon, app_sector_
     elif df[alt_col].max() < min_FAF_baro:
         return False
     elif distance.great_circle((ad_lat, ad_lon), (
-    df.loc[df[alt_col].idxmin()]['lat'], df.loc[df[alt_col].idxmin()]['lon'])).nm > app_sector_rad:
+            df.loc[df[alt_col].idxmin()]['lat'], df.loc[df[alt_col].idxmin()]['lon'])).nm > app_sector_rad:
         return False
     elif distance.great_circle((ad_lat, ad_lon),
             (df.iloc[0]['lat'], df.iloc[0]['lon'])).km < max_range \
@@ -243,6 +243,25 @@ def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
     unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
     #unit_df['r'] = norms # Create a new column for the distance between consecutive points
     return unit_df
+
+
+def calculate_unit_vectors_cupy(flt_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate the unit vectors of the trajectory DataFrame.
+    Input:
+        flt_df: A DataFrame containing the trajectory data of a single flight.
+    Output:
+        unit_df: A DataFrame containing the unit vectors of the trajectory.
+    """
+    flt_arr = cp.asarray(flt_df.values) # Convert the DataFrame to a CuPy array
+    diff_arr = cp.diff(flt_arr, axis=0) # Calculate the differences between consecutive points
+    norms = cp.linalg.norm(diff_arr, axis=1) # Calculate the norm of each difference vector
+    unit_arr = diff_arr / norms[:, cp.newaxis] # Normalize each difference vector to get the unit vectors
+    unit_arr_np = cp.asnumpy(unit_arr) # Convert the unit vectors back to a numpy array
+    unit_df = pd.DataFrame(unit_arr_np, columns=['u_x', 'u_y', 'u_z']) # Convert the unit vectors to a DataFrame
+    #unit_df['r'] = cp.asnumpy(norms) # Create a new column for the distance between consecutive points
+    return unit_df
+
 
 def is_smooth(df, threshold):
     """
