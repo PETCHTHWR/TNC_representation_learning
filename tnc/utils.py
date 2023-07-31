@@ -493,7 +493,6 @@ def rotate_3D_cuda(vector, angle_degrees_z, angle_degrees_x):
 def augment_with_offset(vector, off_x, off_y, off_z):
     offset = torch.stack([off_x, off_y, off_z], dim=0).to(vector.device)
     augmented_vector = vector + offset
-    augmented_vector /= torch.linalg.norm(augmented_vector)
     return augmented_vector
 
 def augment_with_rotation(vectors, angle_degrees_z, angle_degrees_x):
@@ -520,3 +519,50 @@ def augment_with_rotation(vectors, angle_degrees_z, angle_degrees_x):
     rotated_vectors = torch.matmul(rotation_matrix_x, rotated_vectors)
 
     return rotated_vectors
+
+
+def augment_sect_tensor(tensor, center_portion = 0.5, r_bins = 10, theta_bins = 24, z_bins = 10):
+    """
+    Augment a tensor by adding a random offset to each axis of each (3, 100) window.
+    The offset for each axis is independently randomly selected from the set (-1, 0, 1) with probabilities specified by `center_portion`.
+
+    Parameters:
+    tensor (torch.Tensor): A tensor of shape (N, 3, 100).
+    center_portion (float): Portion to be assigned to the center value in the distribution.
+
+    Returns:
+    tensor (torch.Tensor): The augmented tensor.
+    """
+
+    # Define the set of values and their probabilities
+    values_r = torch.tensor([-2 / r_bins, 0, 2 / r_bins], dtype=torch.float32, device=tensor.device)
+    values_theta = torch.tensor([-2 / theta_bins, 0, 2 / theta_bins], dtype=torch.float32, device=tensor.device)
+    values_z = torch.tensor([-2 / z_bins, 0, 2 / z_bins], dtype=torch.float32, device=tensor.device)
+
+    side_portion = (1.0 - center_portion) / 2
+    probabilities = torch.tensor([side_portion, center_portion, side_portion], dtype=torch.float32,
+                                 device=tensor.device)
+
+    # Calculate number of windows and axes in your tensor
+    num_windows, num_axes, window_length = tensor.shape
+
+    # Generate offsets for each axis of each window
+    offsets_r = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
+    offsets_theta = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
+    offsets_z = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
+
+    # Map the offsets to the corresponding values
+    offsets_r = values_r[offsets_r]
+    offsets_theta = values_theta[offsets_theta]
+    offsets_z = values_z[offsets_z]
+
+    # Stack the offsets
+    offsets = torch.stack([offsets_r, offsets_theta, offsets_z], dim=1)
+
+    # Reshape and repeat the offsets to match the shape of the tensor
+    offsets = offsets.view(num_windows, num_axes, 1).repeat(1, 1, window_length)
+
+    # Add the offsets to the tensor
+    tensor += offsets
+
+    return tensor

@@ -241,26 +241,44 @@ def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
     norms = np.sqrt((diff_df**2).sum(axis=1)) # Calculate the norm of each difference vector
     unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
     unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
-    #unit_df['r'] = norms # Create a new column for the distance between consecutive points
+    # unit_df['r'] = norms # Add the norm of the difference vectors as a column
     return unit_df
 
-
-def calculate_unit_vectors_cupy(flt_df: pd.DataFrame) -> pd.DataFrame:
+def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, z_bins: int, r_max: float):
     """
-    Calculate the unit vectors of the trajectory DataFrame.
+    Discretize 3D trajectories into radial, angular and vertical sectors, then normalize these to the range -1 to 1.
     Input:
-        flt_df: A DataFrame containing the trajectory data of a single flight.
+        df: A DataFrame containing the 3D trajectories.
+        r_bins: The number of radial sectors.
+        theta_bins: The number of angular sectors.
+        z_bins: The number of altitude sectors.
+        r_max: The maximum radius to consider.
     Output:
-        unit_df: A DataFrame containing the unit vectors of the trajectory.
+        df_sectors: A DataFrame with the sector assignments, normalized to -1 to 1.
     """
-    flt_arr = cp.asarray(flt_df.values) # Convert the DataFrame to a CuPy array
-    diff_arr = cp.diff(flt_arr, axis=0) # Calculate the differences between consecutive points
-    norms = cp.linalg.norm(diff_arr, axis=1) # Calculate the norm of each difference vector
-    unit_arr = diff_arr / norms[:, cp.newaxis] # Normalize each difference vector to get the unit vectors
-    unit_arr_np = cp.asnumpy(unit_arr) # Convert the unit vectors back to a numpy array
-    unit_df = pd.DataFrame(unit_arr_np, columns=['u_x', 'u_y', 'u_z']) # Convert the unit vectors to a DataFrame
-    #unit_df['r'] = cp.asnumpy(norms) # Create a new column for the distance between consecutive points
-    return unit_df
+    # Calculate radius and bearing from x, y, z
+    radius = (df['x']**2 + df['y']**2)**0.5
+    bearing = np.arctan2(df['x'], df['y'])
+
+    # Normalize bearing to 0-2pi
+    bearing = (bearing + 2 * np.pi) % (2 * np.pi)
+
+    # Discretize into sectors and normalize to -1 to 1
+    r_sector = pd.cut(radius, bins=np.linspace(0, r_max, r_bins + 1), labels=False, include_lowest=True)
+    r_sector = 2 * (r_sector / r_bins) - 1
+    theta_sector = pd.cut(bearing, bins=np.linspace(0, 2 * np.pi, theta_bins + 1), labels=False, include_lowest=True)
+    theta_sector = 2 * (theta_sector / theta_bins) - 1
+    z_sector = pd.cut(df['z'], bins=np.linspace(0, r_max/10, z_bins + 1), labels=False, include_lowest=True)
+    z_sector = 2 * (z_sector / z_bins) - 1
+
+    # Create new DataFrame with only the sector information
+    df_sectors = pd.DataFrame({
+        'r_sector': r_sector,
+        'theta_sector': theta_sector,
+        'z_sector': z_sector
+    })
+
+    return df_sectors
 
 
 def is_smooth(df, threshold):

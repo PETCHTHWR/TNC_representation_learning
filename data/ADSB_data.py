@@ -8,7 +8,7 @@ import pickle
 from tqdm import tqdm
 import connectorx as cx
 from atfm.preprocess import preprocess
-from atfm.utils import check_eligible, calculate_unit_vectors, is_smooth, calculate_bearing, check_eligible_cupy, is_flight_path_smooth
+from atfm.utils import calculate_unit_vectors, is_smooth, calculate_bearing, check_eligible_cupy, is_flight_path_smooth, discretize_to_sectors
 from sklearn.preprocessing import MinMaxScaler
 
 def normalize_fourth(train_data, test_data):
@@ -56,13 +56,14 @@ app_sec_rad = 5 # nautical miles
 alt_col = 'baroaltitude'
 max_cutoff_range = 150 # kilometers
 allowed_cutoff_error = 25 # kilometers
-max_angle_change = 60 # degrees
+max_angle_change = 40 # degrees
 max_fltpath_change = 20 # meters
 # Preprocessing parameters
-target_length = 2000 + 1
+target_length = 2000
 data_size = 1000
+r_bins, theta_bins, z_bins = 10, 24, 10
 
-required_data = int(data_size * 100)
+required_data = int(data_size * 120)
 ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
 ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=required_data).values.T.tolist()[0]
 random.shuffle(ids_arr)
@@ -72,7 +73,7 @@ ADSB_arr['time'] = pd.to_datetime(ADSB_arr['time'], unit='s')
 ADSB_arr = ADSB_arr.groupby('flight_id')
 print('Total Arrival :', len(ids_arr))
 
-required_data = int(data_size * 100)
+required_data = int(data_size * 120)
 ids_dep = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=0" % (id_tab, too_short, too_long), return_type="arrow")
 ids_dep = ids_dep.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=required_data).values.T.tolist()[0]
 random.shuffle(ids_dep)
@@ -105,18 +106,6 @@ for ADSB in [ADSB_arr, ADSB_dep]:
             num_reject += 1
             continue
 
-        flt_arr = cp.asarray(flt_df[['x', 'y', 'z']].values)  # Convert DataFrame to CuPy array
-        max_dist = cp.max(cp.linalg.norm(flt_arr[:, :2], axis=1))  # Calculate maximum Euclidean norm for x, y
-        min_alt = cp.min(flt_arr[:, 2])  # Calculate minimum altitude
-        if max_dist < (max_cutoff_range - allowed_cutoff_error) * 1000 or max_dist > max_cutoff_range * 1000 or min_alt > FAF:
-            num_reject += 1
-            continue
-
-        unit_df = calculate_unit_vectors(flt_df) # Calculate unit vectors
-        if not is_smooth(unit_df, max_angle_change) or not is_flight_path_smooth(unit_df, max_fltpath_change):
-            num_reject += 1
-            continue
-
         # Undersampling
         north_bearing = calculate_bearing(flt_df.iloc[-1]['x'], flt_df.iloc[-1]['y']) \
             if not arrival else calculate_bearing(flt_df.iloc[0]['x'], flt_df.iloc[0]['y'])
@@ -127,13 +116,39 @@ for ADSB in [ADSB_arr, ADSB_dep]:
             num_dump += 1
             continue
 
-        joined_df = pd.concat([flt_df, unit_df], axis=1) # join the dataframes
-        joined_df[unit_df.columns] = joined_df[unit_df.columns].shift(-1) # shift the unit vectors by 1
-        df_ls.append(joined_df) # append the dataframe
-        bearing.append(north_bearing)  # append the bearing
+        # Check if the flight is really eligible if not rejected and subtract the count
+        flt_arr = cp.asarray(flt_df[['x', 'y', 'z']].values)  # Convert DataFrame to CuPy array
+        max_dist = cp.max(cp.linalg.norm(flt_arr[:, :2], axis=1))  # Calculate maximum Euclidean norm for x, y
+        min_alt = cp.min(flt_arr[:, 2])  # Calculate minimum altitude
+        if max_dist < (max_cutoff_range - allowed_cutoff_error) * 1000 \
+                or max_dist > max_cutoff_range * 1000 or min_alt > FAF:
+            counts[region] -= 1
+            num_reject += 1
+            continue
 
-        # Stop if the number of accepted flights reaches the data size
-        num_accept += 1
+        # Check if the flight is smooth and subtract the count if not
+        unit_df = calculate_unit_vectors(flt_df) # Calculate unit vectors
+        if not is_smooth(unit_df, max_angle_change) \
+                or not is_flight_path_smooth(unit_df, max_fltpath_change) \
+                or unit_df.shape[0] != target_length - 1:
+            counts[region] -= 1
+            num_reject += 1
+            continue
+
+        # Discretize the unit vectors and subtract the count if not
+        disc_df = discretize_to_sectors(flt_df, r_bins=r_bins, theta_bins=theta_bins, z_bins=z_bins, r_max = max_cutoff_range * 1000)
+        joined_df = pd.concat([flt_df, unit_df, disc_df], axis=1) # join the dataframes
+        joined_df[unit_df.columns.tolist()] = joined_df[unit_df.columns.tolist()].shift(-1) # shift the unit vectors by 1
+        for col in unit_df.columns.tolist():
+            joined_df.loc[joined_df.index[-1], col] = joined_df.loc[joined_df.index[-2], col]
+        if joined_df.dropna().shape[0] != target_length:
+            counts[region] -= 1
+            num_reject += 1
+            continue
+
+        df_ls.append(joined_df.dropna())  # append the dataframe
+        bearing.append(north_bearing)  # append the bearing
+        num_accept += 1 # Stop if the number of accepted flights reaches the data size
         if num_accept == data_size:
             break
 
@@ -164,22 +179,22 @@ for df_ls in arr_dep:
 
     random.seed(42)  # Set a common seed value for consistent sampling
 
-    flt_traj_and_path_ls = [df.dropna().T.to_numpy() for df in df_ls if df.iloc[:, -3:].dropna(how='all').T.shape == (3, target_length-1)]
+    flt_traj_and_path_ls = [df.T.to_numpy() for df in df_ls if df.shape[0] == target_length]
     sampled_data = random.sample(flt_traj_and_path_ls, data_size)
-
     flt_traj_ls = [data[:3, :] for data in sampled_data]
     flt_traj_array = np.stack(flt_traj_ls, axis=0)
 
-    flt_path_ls = [data[-3:, :] for data in sampled_data]
+    flt_path_ls = [data[3:, :] for data in sampled_data]
     flt_path_array = np.stack(flt_path_ls, axis=0)
 
     n_train = int(len(flt_path_array) * 0.8)
     train_data = flt_path_array[:n_train]
     test_data = flt_path_array[n_train:]
+    train_data, test_data = normalize_fourth(train_data, test_data)
+
+    # Reference Trajectory
     train_traj = flt_traj_array[:n_train]
     test_traj = flt_traj_array[n_train:]
-
-    #train_data, test_data = normalize_fourth(train_data, test_data)
 
     print("Data for Arrival" if df_ls is arr_dep[0] else "Data for Departure")
     print("Flight Path Dataset Shape ====> \tTrainset: ", train_data.shape, "\tTestset: ", test_data.shape)
@@ -198,28 +213,43 @@ for df_ls in arr_dep:
     with open(data_dir + '/traj_test.pkl', 'wb') as f:
         pickle.dump(test_traj, f)
 
-    fig, axs = plt.subplots(6, figsize=(10, 15))
-    # x plots from test_traj
-    for i in range(3):
-        axs[i].plot(np.arange(target_length-1), test_traj[:, i, :].T)
+    # Plot the trajectory profile
+    fig, axs = plt.subplots(test_traj.shape[1], figsize=(10, 10))
+    for i in range(test_traj.shape[1]):
+        axs[i].plot(np.arange(target_length), test_traj[:, i, :].T)
         axs[i].set_ylabel('X' if i == 0 else 'Y' if i == 1 else 'Z')
-
-    # unit vector plot from test_data
-    for i in range(3):
-        axs[i + 3].plot(np.arange(target_length-1), test_data[:, i, :].T)
-        axs[i + 3].set_ylabel('U_X' if i == 0 else 'U_Y' if i == 1 else 'U_Z')
-        axs[i + 3].set_ylim(-1, 1)
-    # Plot norm
-    #axs[6].plot(np.arange(target_length-1), test_data[:, 3, :].T)
-    #axs[6].set_ylabel('Distance between points')
     plt.tight_layout()
+    fig.savefig(data_dir + '/original_trajectory_profile.png')
 
-    # save figure
-    fig.savefig(data_dir + '/sample_plot.png')
+    # Plot the states profile
+    fig, axs = plt.subplots(test_data.shape[1], figsize=(10, 10))
+    label = ['u_x', 'u_y', 'u_z', 'dr', 'sec_r', 'sec_theta', 'sec_z']
+    for i in range(test_data.shape[1]):
+        axs[i].plot(np.arange(target_length), test_data[:, i, :].T)
+        axs[i].set_ylabel(label[i])
+        if i != 3:
+            axs[i].set_ylim(-1, 1)
+    plt.tight_layout()
+    fig.savefig(data_dir + '/states_profile.png')
+
+    # Set up your sectors' edges
+    r_max = max_cutoff_range * 1000
+    theta_edges = np.linspace(0, 2 * np.pi, theta_bins + 1)
+    r_edges = np.linspace(0, r_max, r_bins + 1)
 
     # 2D topview plot
     fig, axs = plt.subplots(1, figsize=(10, 10))
     axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T)
+
+    # Draw your sectors
+    for r in r_edges:
+        circle = plt.Circle((0, 0), r, color='black', fill=False)
+        axs.add_artist(circle)
+
+    for theta in theta_edges:
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black')
+
+    # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
     axs.add_patch(circle)
     axs.set_xlabel('X')
@@ -233,6 +263,16 @@ for df_ls in arr_dep:
     # 2D topview plot with training data
     fig, axs = plt.subplots(1, figsize=(10, 10))
     axs.plot(train_traj[:, 0, :].T, train_traj[:, 1, :].T)
+
+    # Draw your sectors
+    for r in r_edges:
+        circle = plt.Circle((0, 0), r, color='black', fill=False)
+        axs.add_artist(circle)
+
+    for theta in theta_edges:
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black')
+
+    # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
     axs.add_patch(circle)
     axs.set_xlabel('X')
