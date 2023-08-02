@@ -52,9 +52,11 @@ class TransformerEncoder(nn.Module):
 
     def forward(self, x):
         x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device
+        print(x.shape)
         encodings = self.encoder(x)
         encodings = encodings[-1].squeeze(0)  # Take the last layer output and remove the time step dimension
         encodings = self.fcn(encodings)  # Apply the FCN to map to the desired output size
+        print(encodings.shape)
         return encodings
 
 
@@ -70,19 +72,26 @@ class BranchedTransformerEncoder(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
 
-        self.encoder_left = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.encoder_right = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.encoder_1 = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.fcn_1 = nn.Linear(d_model, int(encoding_size / 2)).to(device)  # Modify the output size of the linear layer
 
-        self.fcn_left = nn.Linear(d_model, encoding_size).to(device)  # Modify the output size of the linear layer
-        self.fcn_right = nn.Linear(d_model, encoding_size).to(device)  # Modify the output size of the linear layer
+        self.encoder_2 = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.fcn_2 = nn.Linear(d_model, int(encoding_size / 2)).to(device)  # Modify the output size of the linear layer
+
     def forward(self, x):
         x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device
+        x1 = x[:, :, :int(x.shape[2]/2)]
+        x2 = x[:, :, int(x.shape[2]/2):]
 
-        x1 = x[:, :int(x.shape[1] / 2), :]
-        x2 = x[:, int(x.shape[1] / 2):, :]
-        encodings = self.encoder(x)
-        encodings = encodings[-1].squeeze(0)  # Take the last layer output and remove the time step dimension
-        encodings = self.fcn(encodings)  # Apply the FCN to map to the desired output size
+        encodings_1 = self.encoder_1(x1)
+        encodings_1 = encodings_1[-1].squeeze(0)  # Take the last layer output and remove the time step dimension
+        encodings_1 = self.fcn_1(encodings_1)  # Apply the FCN to map to the desired output size
+
+        encodings_2 = self.encoder_2(x2)
+        encodings_2 = encodings_2[-1].squeeze(0)  # Take the last layer output and remove the time step dimension
+        encodings_2 = self.fcn_2(encodings_2)  # Apply the FCN to map to the desired output size
+
+        encodings = torch.cat((encodings_1, encodings_2), dim=-1)
         return encodings
 
 

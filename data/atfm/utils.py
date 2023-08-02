@@ -242,7 +242,23 @@ def calculate_unit_vectors(flt_df: pd.DataFrame) -> pd.DataFrame:
     unit_df = diff_df.div(norms, axis=0) # Divide each difference vector by its norm to get the unit vectors
     unit_df.columns = ['u_x', 'u_y', 'u_z'] # The unit vectors are now stored in unit_df as 'x', 'y', and 'z'
     # unit_df['r'] = norms # Add the norm of the difference vectors as a column
+
     return unit_df
+
+def calculate_velocities(flt_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate the velocities of the trajectory DataFrame.
+    @param flt_df: A DataFrame containing the trajectory data of a single flight.
+    @return: A DataFrame containing the velocities of the trajectory.
+    """
+    diff_df = flt_df.diff().dropna() # Create a new DataFrame for the differences
+    time_diff = diff_df.index.to_series().diff().dt.total_seconds().values # Calculate the time difference between each point
+    diff_df['v_x'] = diff_df['x'] / time_diff # Calculate the velocity in each direction
+    diff_df['v_y'] = diff_df['y'] / time_diff # Calculate the velocity in each direction
+    diff_df['v_z'] = diff_df['z'] / time_diff # Calculate the velocity in each direction
+    diff_df = diff_df.drop(['x', 'y', 'z'], axis=1) # Drop the x, y, and z columns
+
+    return diff_df
 
 def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, z_bins: int, r_max: float):
     """

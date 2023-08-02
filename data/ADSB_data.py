@@ -61,7 +61,7 @@ max_fltpath_change = 20 # meters
 # Preprocessing parameters
 target_length = 2000
 data_size = 1000
-r_bins, theta_bins, z_bins = 10, 24, 10
+r_bins, theta_bins, z_bins = 3, 24, 3
 
 required_data = int(data_size * 120)
 ids_arr = cx.read_sql(db_url, "SELECT DISTINCT id FROM %s WHERE ori_length>=%d AND ori_length<=%d AND arrival=1" % (id_tab, too_short, too_long), return_type="arrow")
@@ -168,7 +168,7 @@ for ADSB in [ADSB_arr, ADSB_dep]:
     ax.set_xlabel('Bearing Group (degrees)')
     ax.set_ylabel('Frequency')
     ax.set_title('Histogram of North Bearing Groups')
-    path = './data/ADSB_data_arr_test' if arrival else './data/ADSB_data_dep_test'
+    path = './data/ADSB_data_arr' if arrival else './data/ADSB_data_dep'
     plt.savefig(f'{path}/bearing_hist.png')
 
 for df_ls in arr_dep:
@@ -201,7 +201,7 @@ for df_ls in arr_dep:
     print("Reference Trajectory Shape ====> \tTrainset: ", train_traj.shape, "\tTestset: ", test_traj.shape)
 
     ## Save signals to file
-    data_dir = './data/ADSB_data_arr_test' if df_ls is arr_dep[0] else './data/ADSB_data_dep_test'
+    data_dir = './data/ADSB_data_arr' if df_ls is arr_dep[0] else './data/ADSB_data_dep'
     if not os.path.exists(data_dir):
         os.mkdir(data_dir)
     with open(data_dir + '/x_train.pkl', 'wb') as f:
@@ -243,11 +243,11 @@ for df_ls in arr_dep:
 
     # Draw your sectors
     for r in r_edges:
-        circle = plt.Circle((0, 0), r, color='black', fill=False)
+        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.5)
         axs.add_artist(circle)
 
     for theta in theta_edges:
-        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black')
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.5)
 
     # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
@@ -266,11 +266,11 @@ for df_ls in arr_dep:
 
     # Draw your sectors
     for r in r_edges:
-        circle = plt.Circle((0, 0), r, color='black', fill=False)
+        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.5)
         axs.add_artist(circle)
 
     for theta in theta_edges:
-        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black')
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.5)
 
     # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)

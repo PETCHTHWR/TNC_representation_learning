@@ -14,7 +14,7 @@ import torch
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, AgglomerativeClustering
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -131,7 +131,6 @@ def track_encoding(sample, label, encoder, window_size, path, sliding_gap=5):
 
 def track_encoding_ADSB(sample, traj, encoder, window_size, path, idx, sliding_gap=5):
     T = sample.shape[-1]
-    windows_label = []
     encodings = []
     device = 'cuda'
     encoder.to(device)
@@ -278,11 +277,16 @@ def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
 
 
 def plot_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, n_clusters=10, max_cutoff_range=150):
-
     # Plot t-sne of the encoded trajectories
-    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in range(sample.shape[0])]).reshape((sample.shape[0], -1))
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    cluster_assignments = kmeans.fit_predict(enc_traj)
+    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in
+                         range(sample.shape[0])]).reshape((sample.shape[0], -1))
+
+    # Use AgglomerativeClustering (Hierarchical Clustering) instead of KMeans
+    hierarchical = AgglomerativeClustering(n_clusters=n_clusters)
+    cluster_assignments = hierarchical.fit_predict(enc_traj)
+
+    tsne = TSNE(n_components=2, random_state=42)
+    tsne_results = tsne.fit_transform(enc_traj)
 
     tsne = TSNE(n_components=2, random_state=42)
     tsne_results = tsne.fit_transform(enc_traj)
@@ -521,7 +525,8 @@ def augment_with_rotation(vectors, angle_degrees_z, angle_degrees_x):
     return rotated_vectors
 
 
-def augment_sect_tensor(tensor, center_portion = 0.5, r_bins = 10, theta_bins = 24, z_bins = 10):
+def augment_sect_tensor(tensor, p_r = 0.5, p_theta = 0.5, p_z = 0.5,
+                        r_bins = 10, theta_bins = 24, z_bins = 10):
     """
     Augment a tensor by adding a random offset to each axis of each (3, 100) window.
     The offset for each axis is independently randomly selected from the set (-1, 0, 1) with probabilities specified by `center_portion`.
@@ -539,17 +544,22 @@ def augment_sect_tensor(tensor, center_portion = 0.5, r_bins = 10, theta_bins = 
     values_theta = torch.tensor([-2 / theta_bins, 0, 2 / theta_bins], dtype=torch.float32, device=tensor.device)
     values_z = torch.tensor([-2 / z_bins, 0, 2 / z_bins], dtype=torch.float32, device=tensor.device)
 
-    side_portion = (1.0 - center_portion) / 2
-    probabilities = torch.tensor([side_portion, center_portion, side_portion], dtype=torch.float32,
-                                 device=tensor.device)
+    side_portion_r = (1.0 - p_r) / 2
+    probabilities_r = torch.tensor([side_portion_r, p_r, side_portion_r], dtype=torch.float32, device=tensor.device)
+
+    side_portion_theta = (1.0 - p_theta) / 2
+    probabilities_theta = torch.tensor([side_portion_theta, p_theta, side_portion_theta], dtype=torch.float32, device=tensor.device)
+
+    side_portion_z = (1.0 - p_z) / 2
+    probabilities_z = torch.tensor([side_portion_z, p_z, side_portion_z], dtype=torch.float32, device=tensor.device)
 
     # Calculate number of windows and axes in your tensor
     num_windows, num_axes, window_length = tensor.shape
 
     # Generate offsets for each axis of each window
-    offsets_r = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
-    offsets_theta = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
-    offsets_z = torch.multinomial(probabilities, num_samples=num_windows, replacement=True)
+    offsets_r = torch.multinomial(probabilities_r, num_samples=num_windows, replacement=True)
+    offsets_theta = torch.multinomial(probabilities_theta, num_samples=num_windows, replacement=True)
+    offsets_z = torch.multinomial(probabilities_z, num_samples=num_windows, replacement=True)
 
     # Map the offsets to the corresponding values
     offsets_r = values_r[offsets_r]
