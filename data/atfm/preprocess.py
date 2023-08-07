@@ -2,6 +2,7 @@ import pandas as pd
 from .utils import latlon_to_xy, latlonalt_to_xyz
 from scipy.signal import savgol_filter
 from scipy import stats
+import numpy as np
 
 def baroprojection(df, ref_lat, ref_lon, ref_alt):
     """
@@ -61,6 +62,22 @@ def smooth_savgol(df, window_size=7, order=2):
 
     return smoothed_df
 
+def smooth_savgol_vel(df, window_size=7, order=2):
+    """
+    Smooth the trajectory using Savitzky-Golay filter
+    :param df: pandas DataFrame containing columns 'x', 'y', 'z'
+    :param window_size: size of the smoothing window
+    :param order: order of the polynomial
+    :return: pandas DataFrame
+    """
+    smoothed_df = df.copy()
+
+    smoothed_df['v_x'] = savgol_filter(df['v_x'].values, window_size, order)
+    smoothed_df['v_y'] = savgol_filter(df['v_y'].values, window_size, order)
+    smoothed_df['v_z'] = savgol_filter(df['v_z'].values, window_size, order)
+
+    return smoothed_df
+
 # @timeit
 def interpolate(df, periods=200):
     """
@@ -90,10 +107,37 @@ def remove_outliers(df, threshold=3):
     df = df.copy()  # To ensure we don't modify the original dataframe
     df.loc[:, 'z_diff'] = df['z'].diff()
     df = df.dropna()
-    df.loc[:, 'z_diff_z'] = stats.zscore(df['z_diff'])
+    df.loc[:, 'z_diff_z'] = stats.zscore(df['z_diff'].abs())
     df = df[df['z_diff_z'].abs() <= threshold]
     df = df.drop(columns=['z_diff', 'z_diff_z'])
     return df
+
+
+def remove_outliers_vel(df, threshold=3):
+    df = df.copy()  # To ensure we don't modify the original dataframe
+    cols = ['v_x', 'v_y', 'v_z']
+    for col in cols:
+        diff_col_name = f'{col}_diff'
+        diff_z_col_name = f'{col}_diff_z'
+
+        df[diff_col_name] = df[col].diff().abs()
+        df[diff_z_col_name] = stats.zscore(df[diff_col_name])
+
+        # Identify outliers
+        outliers = df[np.abs(df[diff_z_col_name]) > threshold]
+
+        # Replace outliers with NaN
+        for outlier in outliers.index:
+            df.loc[outlier, col] = np.nan
+
+        # Interpolate missing values
+        df[col].interpolate(method='linear', inplace=True)
+
+        # drop intermediate columns
+        df = df.drop(columns=[diff_col_name, diff_z_col_name])
+
+    return df
+
 
 def clip(df, max_range):
     """
@@ -148,7 +192,7 @@ def resample_and_trim_trajectory(df, target_length=1500):
     return resampled_df
 
 def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range = 100,
-               alt_column='geoaltitude', freq='1s', zscore_threshold=3, window_size=7, order=2):
+               alt_column='geoaltitude', freq='1s', zscore_threshold=3, window_size=7, order=2, unify=True):
     """
     Preprocess the trajectory
     :param df: pandas dataframe containing columns 'lat', 'lon', alt_column
@@ -174,8 +218,11 @@ def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range = 100,
         return None
 
     df_new = resample(df_new, freq=freq) # resample to 1s
-    df_new = remove_outliers(df_new, threshold=zscore_threshold) # remove outliers
-    df_new = interpolate(df_new, periods=periods) # interpolate to 200 points
+    df_new = remove_outliers(df_new, threshold=zscore_threshold).interpolate() # remove outliers
+
+    if unify:
+        df_new = interpolate(df_new, periods=periods) # interpolate to 200 points
+
     df_new = smooth_savgol(df_new, window_size=window_size, order=order)
 
     #df_new = normalize(df_new, max_range_x)

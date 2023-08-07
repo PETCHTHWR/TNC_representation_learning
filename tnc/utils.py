@@ -4,17 +4,20 @@ import numpy as np
 import cupy as cp
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import seaborn as sns
 from matplotlib import gridspec
 from matplotlib.patches import Ellipse
 import matplotlib.transforms as transforms
-
+import math
 from torch.utils import data
 import torch
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.metrics import silhouette_score, davies_bouldin_score, silhouette_samples
+from yellowbrick.cluster import SilhouetteVisualizer
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -214,18 +217,98 @@ def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
     encodings = torch.stack(encodings, 0)
     return encodings.detach().cpu().numpy().T
 
-def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
-    # Plot t-sne of the encoded trajectories
-    traj_reshaped = traj.reshape(traj.shape[0], -1)
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    cluster_assignments = kmeans.fit_predict(traj_reshaped)
+def compute_cluster_scores(data, range_n_clusters):
+    best_n_clusters = 0
+    best_score = -1
+    dbi_scores = []
+    best_dbi_score = np.inf
+    best_n_clusters_dbi = None
+    sil_scores = []
 
+    for n_clusters in range_n_clusters:
+        hierarchical = AgglomerativeClustering(n_clusters=n_clusters)
+        cluster_assignments = hierarchical.fit_predict(data)
+
+        silhouette_avg = silhouette_score(data, cluster_assignments)
+        sil_scores.append(silhouette_avg)
+        print("For n_clusters =", n_clusters, "The average silhouette_score is :", silhouette_avg)
+        if silhouette_avg > best_score:
+            best_score = silhouette_avg
+            best_n_clusters = n_clusters
+
+        dbi = davies_bouldin_score(data, cluster_assignments)
+        dbi_scores.append(dbi)
+        print("For n_clusters =", n_clusters, "The Davies-Bouldin index is :", dbi)
+        if dbi < best_dbi_score:
+            best_dbi_score = dbi
+            best_n_clusters_dbi = n_clusters
+
+    print(f"Best number of clusters = {best_n_clusters} with silhouette score = {best_score}")
+    print(f"Best number of clusters = {best_n_clusters_dbi} with DBI = {best_dbi_score}")
+
+    return best_n_clusters_dbi, sil_scores, dbi_scores
+
+
+def plot_scores(range_n_clusters, sil_scores, dbi_scores, path, filename):
+    fig, ax = plt.subplots(2, 1, figsize=(10, 15))
+
+    ax[0].plot(range_n_clusters, sil_scores)
+    ax[0].set_xlabel('Number of clusters')
+    ax[0].set_ylabel('Silhouette score')
+    ax[0].set_title('Silhouette scores for varying number of clusters')
+
+    ax[1].plot(range_n_clusters, dbi_scores)
+    ax[1].set_xlabel('Number of clusters')
+    ax[1].set_ylabel('Davies-Bouldin Index')
+    ax[1].set_title('DBI for varying number of clusters')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join("./plots/%s" % path, filename))
+
+
+def plot_silhouette_visualizer(best_model, data, path, filename):
+    best_model.fit(data)
+    labels = best_model.labels_
+    silhouette_values = silhouette_samples(data, labels)
+
+    fig, ax = plt.subplots(figsize=(10,6))
+    ax.set_xlim([-0.1, 1])
+    ax.set_ylim([0, len(data) + (len(set(labels)) + 1) * 10])
+
+    y_lower = 10
+    for i in range(len(set(labels))):
+        ith_cluster_silhouette_values = silhouette_values[labels == i]
+        ith_cluster_silhouette_values.sort()
+
+        size_cluster_i = ith_cluster_silhouette_values.shape[0]
+        y_upper = y_lower + size_cluster_i
+
+        color = cm.nipy_spectral(float(i) / len(set(labels)))
+        ax.fill_betweenx(np.arange(y_lower, y_upper),
+                          0, ith_cluster_silhouette_values,
+                          facecolor=color, edgecolor=color, alpha=0.7)
+
+        ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
+
+        y_lower = y_upper + 10
+
+    ax.set_xlabel("Silhouette Coefficient Values")
+    ax.set_ylabel("Cluster Label")
+    ax.axvline(x=silhouette_score(data, labels), color="red", linestyle="--")
+    ax.set_yticks([])
+    ax.set_xticks([-0.1, 0, 0.2, 0.4, 0.6, 0.8, 1])
+    plt.savefig(os.path.join("./plots/%s" % path, filename))
+
+
+def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename, single_cluster_filename, max_cutoff_range=150):
+    # Fit the data and get cluster assignments
+    cluster_assignments = best_model.fit_predict(enc_traj)
     tsne = TSNE(n_components=2, random_state=42)
-    tsne_results = tsne.fit_transform(traj_reshaped)
+    tsne_results = tsne.fit_transform(enc_traj)
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    cmap = plt.cm.get_cmap('rainbow', n_clusters)
-    for i in range(n_clusters):
+    cmap = plt.cm.get_cmap('rainbow', best_model.n_clusters)
+    for i in range(best_model.n_clusters):
         ax.scatter(tsne_results[cluster_assignments == i, 0],
                    tsne_results[cluster_assignments == i, 1],
                    label=f'Cluster {i + 1}',
@@ -237,15 +320,14 @@ def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
     ax.set_xlim(-40, 40)
     ax.set_ylim(-40, 40)
     ax.set_aspect('equal')
-    plt.savefig(os.path.join("./plots/%s" % path, "ori_tsne.png"))
+    plt.savefig(os.path.join("./plots/%s" % path, tsne_filename))
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    for i in range(n_clusters):
+    for i in range(best_model.n_clusters):
         cluster_trajectories = traj[cluster_assignments == i]
         for trajectory in cluster_trajectories:
             ax.plot(trajectory[0], trajectory[1], color=cmap(i), label=f'Cluster {i + 1}')
 
-            # To prevent multiple labels for each cluster in the legend
     handles, labels = plt.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
@@ -256,14 +338,22 @@ def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
     ax.set_aspect('equal')
     plt.tight_layout()
     plt.legend(by_label.values(), by_label.keys())
-    plt.savefig(os.path.join("./plots/%s" % path, "ori_traj_cluster.png"))
+    plt.savefig(os.path.join("./plots/%s" % path, cluster_filename))
+
+    n_clusters = best_model.n_clusters
+    rows = int(math.ceil(math.sqrt(n_clusters)))
+    cols = int(math.ceil(n_clusters / rows))
+
+    fig, axs = plt.subplots(rows, cols, figsize=(8 * cols, 8 * rows))
 
     for i in range(n_clusters):
-        fig, ax = plt.subplots(figsize=(8, 8))
+        row = i // cols
+        col = i % cols
+        ax = axs[row, col]
+
         cluster_trajectories = traj[cluster_assignments == i]
         for trajectory in cluster_trajectories:
             ax.plot(trajectory[0], trajectory[1], color=cmap(i))
-
         ax.set_title(f"Cluster {i + 1}")
         circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
         ax.add_patch(circle)
@@ -271,77 +361,35 @@ def plot_traj_TSNE(traj, path, n_clusters=10, max_cutoff_range=150):
         ax.set_ylabel('Y')
         ax.grid(True)
         ax.set_aspect('equal')
-        plt.tight_layout()
-        plt.savefig(os.path.join("./plots/%s" % path, f"ori_traj_cluster_{i + 1}.png"))
-        plt.close(fig)  # Close the figure to free up memory
+
+    plt.tight_layout()
+    plt.savefig(os.path.join("./plots/%s" % path, f"{single_cluster_filename}.png"))
+    plt.close(fig)  # Close the figure to free up memory
 
 
-def plot_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, n_clusters=10, max_cutoff_range=150):
-    # Plot t-sne of the encoded trajectories
+def plot_traj_TSNE(traj, path, max_cutoff_range=150):
+    traj_reshaped = traj.reshape(traj.shape[0], -1)
+    range_n_clusters = list(range(8, 40))
+
+    best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(traj_reshaped, range_n_clusters)
+    plot_scores(range_n_clusters, sil_scores, dbi_scores, path, "scores_traj.png")
+
+    best_model = AgglomerativeClustering(n_clusters=best_n_clusters_dbi)
+    plot_silhouette_visualizer(best_model, traj_reshaped, path, "silhouette_visualizer_traj.png")
+    plot_TSNE(best_model, traj, traj_reshaped, path, "ori_tsne.png", "ori_traj_cluster.png", "ori_traj_cluster_single", max_cutoff_range=max_cutoff_range)
+
+
+def plot_enc_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, max_cutoff_range=150):
     enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in
                          range(sample.shape[0])]).reshape((sample.shape[0], -1))
+    range_n_clusters = list(range(8, 40))
 
-    # Use AgglomerativeClustering (Hierarchical Clustering) instead of KMeans
-    hierarchical = AgglomerativeClustering(n_clusters=n_clusters)
-    cluster_assignments = hierarchical.fit_predict(enc_traj)
+    best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(enc_traj, range_n_clusters)
+    plot_scores(range_n_clusters, sil_scores, dbi_scores, path, "scores_enc.png")
 
-    tsne = TSNE(n_components=2, random_state=42)
-    tsne_results = tsne.fit_transform(enc_traj)
-
-    tsne = TSNE(n_components=2, random_state=42)
-    tsne_results = tsne.fit_transform(enc_traj)
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    cmap = plt.cm.get_cmap('rainbow', n_clusters)
-    for i in range(n_clusters):
-        ax.scatter(tsne_results[cluster_assignments == i, 0],
-                   tsne_results[cluster_assignments == i, 1],
-                   label=f'Cluster {i + 1}',
-                   color=cmap(i))
-    ax.legend()
-    ax.set_title("t-SNE Plot")
-    ax.set_xlabel("Component 1")
-    ax.set_ylabel("Component 2")
-    ax.set_xlim(-40, 40)
-    ax.set_ylim(-40, 40)
-    ax.set_aspect('equal')
-    plt.savefig(os.path.join("./plots/%s" % path, "tsne.png"))
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    for i in range(n_clusters):
-        cluster_trajectories = traj[cluster_assignments == i]
-        for trajectory in cluster_trajectories:
-            ax.plot(trajectory[0], trajectory[1], color=cmap(i), label=f'Cluster {i + 1}')
-
-            # To prevent multiple labels for each cluster in the legend
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
-    ax.add_patch(circle)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.grid(True)
-    ax.set_aspect('equal')
-    plt.tight_layout()
-    plt.legend(by_label.values(), by_label.keys())
-    plt.savefig(os.path.join("./plots/%s" % path, "traj_cluster.png"))
-
-    for i in range(n_clusters):
-        fig, ax = plt.subplots(figsize=(8, 8))
-        cluster_trajectories = traj[cluster_assignments == i]
-        for trajectory in cluster_trajectories:
-            ax.plot(trajectory[0], trajectory[1], color=cmap(i))
-
-        ax.set_title(f"Cluster {i + 1}")
-        circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
-        ax.add_patch(circle)
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.grid(True)
-        ax.set_aspect('equal')
-        plt.tight_layout()
-        plt.savefig(os.path.join("./plots/%s" % path, f"traj_cluster_{i + 1}.png"))
-        plt.close(fig)  # Close the figure to free up memory
+    best_model = AgglomerativeClustering(n_clusters=best_n_clusters_dbi)
+    plot_silhouette_visualizer(best_model, enc_traj, path, "silhouette_visualizer_enc.png")
+    plot_TSNE(best_model, traj, enc_traj, path, "tsne.png", "enc_cluster.png", "enc_cluster_single", max_cutoff_range=max_cutoff_range)
 
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
     checkpoint = torch.load('./ckpt/%s/checkpoint_%d.pth.tar'%(path, cv))

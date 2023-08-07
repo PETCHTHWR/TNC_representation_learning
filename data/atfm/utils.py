@@ -251,14 +251,25 @@ def calculate_velocities(flt_df: pd.DataFrame) -> pd.DataFrame:
     @param flt_df: A DataFrame containing the trajectory data of a single flight.
     @return: A DataFrame containing the velocities of the trajectory.
     """
-    diff_df = flt_df.diff().dropna() # Create a new DataFrame for the differences
-    time_diff = diff_df.index.to_series().diff().dt.total_seconds().values # Calculate the time difference between each point
-    diff_df['v_x'] = diff_df['x'] / time_diff # Calculate the velocity in each direction
-    diff_df['v_y'] = diff_df['y'] / time_diff # Calculate the velocity in each direction
-    diff_df['v_z'] = diff_df['z'] / time_diff # Calculate the velocity in each direction
-    diff_df = diff_df.drop(['x', 'y', 'z'], axis=1) # Drop the x, y, and z columns
+    # Check if all the necessary columns exist in the DataFrame
+    for column in ['x', 'y', 'z']:
+        if column not in flt_df.columns:
+            raise ValueError(f"Column '{column}' not found in the DataFrame.")
 
-    return diff_df
+    # Calculate the time difference between each point
+    time_diff = flt_df.index.to_series().diff().dt.total_seconds().values[1:]
+
+    # Calculate the differences between each point
+    vel_df = flt_df.diff().iloc[1:]
+
+    # Calculate the velocity in each direction
+    for column in ['x', 'y', 'z']:
+        vel_df[f'v_{column}'] = vel_df[column] / time_diff
+
+    # Drop the original position columns
+    vel_df.drop(['x', 'y', 'z'], axis=1, inplace=True)
+
+    return vel_df
 
 def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, z_bins: int, r_max: float):
     """

@@ -7,7 +7,7 @@ from torch.utils import data
 import matplotlib.pyplot as plt
 import argparse
 import math
-import seaborn as sns;
+import seaborn as sns
 
 sns.set()
 import sys
@@ -19,7 +19,7 @@ import random
 from sklearn.manifold import TSNE
 
 from tnc.models import RnnEncoder, WFEncoder, TransformerEncoder, BranchedTransformerEncoder
-from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_TSNE, plot_traj_TSNE, augment_with_rotation, augment_sect_tensor
+from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_enc_TSNE, plot_traj_TSNE, augment_with_rotation, augment_sect_tensor
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa.stattools import adfuller
 
@@ -119,46 +119,44 @@ class TNCDataset(data.Dataset):
         t_p = [int(t + np.random.randn() * self.epsilon * self.window_size) for F in range(self.mc_sample_size)]
         t_p = [max(self.window_size // 2 + 1, min(t_pp, T - self.window_size // 2)) for t_pp in t_p]
         x_p = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_p])
-        """ Angular augmentation with offset
-        off_x = torch.normal(0, self.omega_x, size=(x_p.shape[0],))
-        off_y = torch.normal(0, self.omega_y, size=(x_p.shape[0],))
-        off_z = torch.normal(0, self.omega_z, size=(x_p.shape[0],))
-        x_p = torch.stack([torch.stack([augment_with_offset(x_p[i, :, j], off_x[i], off_y[i], off_z[i]) for j in range(x_p.shape[2])], dim=1) for i in range(x_p.shape[0])], dim=0)
-        """
 
-        ## Angular augmentation with rotation
+        # Angular augmentation with rotation
         z_angles = torch.normal(0, self.psi, size=(x_p.shape[0],))
         x_angles = torch.normal(0, self.phi, size=(x_p.shape[0],))
         augmented_data = torch.stack([augment_with_rotation(x_p[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_p.shape[0])], dim=0)
         x_p[:, :3, :] = augmented_data
+
+        # Spatial augmentation
         augmented_data = augment_sect_tensor(x_p[:, 3:, :], p_r=self.p_r, p_theta=self.p_theta, p_z=self.p_z,
                                              r_bins=self.r_bin, theta_bins=self.theta_bin, z_bins=self.z_bin)
         x_p[:, 3:, :] = augmented_data
 
         return x_p
 
-    def _find_neighours_spatial(self, x, t):
+    def _find_neighours_spatial_only(self, x, t):
 
         window = x[:, t - self.window_size // 2:t + self.window_size // 2]
         x_p = window.unsqueeze(0).repeat(self.mc_sample_size, 1, 1)
+
+        # Angular augmentation with rotation
         z_angles = torch.normal(0, self.psi, size=(x_p.shape[0],))
         x_angles = torch.normal(0, self.phi, size=(x_p.shape[0],))
         augmented_data = torch.stack([augment_with_rotation(x_p[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_p.shape[0])], dim=0)
         x_p[:, :3, :] = augmented_data
+
+        # Spatial augmentation
         augmented_data = augment_sect_tensor(x_p[:, 3:, :], p_r=self.p_r, p_theta=self.p_theta, p_z=self.p_z,
                                              r_bins=self.r_bin, theta_bins=self.theta_bin, z_bins=self.z_bin)
         x_p[:, 3:, :] = augmented_data
 
         return x_p
 
-    def _find_non_neighours(self, x, t):
+    def _find_non_neighours_temp(self, x, t):
         T = self.time_series.shape[-1]
         if t > T / 2:
-            t_n = np.random.randint(self.window_size // 2, max((t - self.delta + 1), self.window_size // 2 + 1),
-                                    self.mc_sample_size)
+            t_n = np.random.randint(self.window_size // 2, max((t - self.delta + 1), self.window_size // 2 + 1), self.mc_sample_size)
         else:
-            t_n = np.random.randint(min((t + self.delta), (T - self.window_size - 1)), (T - self.window_size // 2),
-                                    self.mc_sample_size)
+            t_n = np.random.randint(min((t + self.delta), (T - self.window_size - 1)), (T - self.window_size // 2), self.mc_sample_size)
         x_n = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_n])
 
         if len(x_n) == 0:
@@ -168,35 +166,75 @@ class TNCDataset(data.Dataset):
             else:
                 x_n = x[:, T - rand_t - self.window_size:T - rand_t].unsqueeze(0)
 
-        """ Angular augmentation with offset
-        off_x = torch.normal(0, self.omega_x, size=(x_n.shape[0],))
-        off_y = torch.normal(0, self.omega_y, size=(x_n.shape[0],))
-        off_z = torch.normal(0, self.omega_z, size=(x_n.shape[0],))
-        x_n = torch.stack([torch.stack([augment_with_offset(x_n[i, :, j], off_x[i], off_y[i], off_z[i]) for j in range(x_n.shape[2])], dim=1) for i in range(x_n.shape[0])], dim=0)
-        """
-
-        ## Angular augmentation with rotation
-        z_angles = torch.normal(0, self.psi * 3, size=(x_n.shape[0],))
-        x_angles = torch.normal(0, self.phi * 3, size=(x_n.shape[0],))
-        augmented_data = torch.stack([augment_with_rotation(x_n[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n.shape[0])], dim=0)
+        # Angular augmentation with rotation
+        z_angles = torch.normal(0, self.psi, size=(x_n.shape[0],))
+        x_angles = torch.normal(0, self.phi, size=(x_n.shape[0],))
+        augmented_data = torch.stack(
+            [augment_with_rotation(x_n[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n.shape[0])], dim=0)
         x_n[:, :3, :] = augmented_data
+
+        # Spatial augmentation
         augmented_data = augment_sect_tensor(x_n[:, 3:, :], p_r=self.p_r, p_theta=self.p_theta, p_z=self.p_z,
                                              r_bins=self.r_bin, theta_bins=self.theta_bin, z_bins=self.z_bin)
         x_n[:, 3:, :] = augmented_data
 
         return x_n
 
-    def _find_non_neighours_spatial(self, x, t):
+    def _find_non_neighours(self, x, t):
+        T = self.time_series.shape[-1]
+        spatial_size = int(self.mc_sample_size * 0.8)
+        temporal_size = self.mc_sample_size - spatial_size
+        r_bin_list = np.linspace(-1, 1, self.r_bin)
+        theta_bin_list = np.linspace(-1, 1, self.theta_bin)
+        z_bin_list = np.linspace(-1, 1, self.z_bin)
 
-        window = x[:, t - self.window_size // 2:t + self.window_size // 2]
-        x_n = window.unsqueeze(0).repeat(self.mc_sample_size, 1, 1)
-        z_angles = torch.empty(x_n.shape[0]).uniform_(2 * self.psi, 360 - (2 * self.psi))
-        x_angles = torch.empty(x_n.shape[0]).uniform_(2 * self.phi, 360 - (2 * self.phi))
-        augmented_data = torch.stack([augment_with_rotation(x_n[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n.shape[0])], dim=0)
-        x_n[:, :3, :] = augmented_data
-        augmented_data = augment_sect_tensor(x_n[:, 3:, :], p_r=self.p_r, p_theta=self.p_theta, p_z=self.p_z,
-                                             r_bins=self.r_bin, theta_bins=self.theta_bin, z_bins=self.z_bin)
-        x_n[:, 3:, :] = augmented_data
+        # Find non-neighbouring in time
+        if t > T / 2:
+            t_n = np.random.randint(self.window_size // 2, max((t - self.delta + 1), self.window_size // 2 + 1), temporal_size)
+        else:
+            t_n = np.random.randint(min((t + self.delta), (T - self.window_size - 1)), (T - self.window_size // 2), temporal_size)
+
+        x_n_time = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_n])
+        if len(x_n_time) == 0:
+            rand_t = np.random.randint(0, self.window_size // 5)
+            x_n_time = x[:, rand_t:rand_t + self.window_size].unsqueeze(0) if t > T / 2 else x[:, T - rand_t - self.window_size:T - rand_t].unsqueeze(0)
+
+        z_angles = torch.normal(0, self.psi, size=(x_n_time.shape[0],))
+        x_angles = torch.normal(0, self.phi, size=(x_n_time.shape[0],))
+        augmented_data = torch.stack([augment_with_rotation(x_n_time[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n_time.shape[0])], dim=0)
+        x_n_time[:, :3, :] = augmented_data
+
+        ## Random from a Gaussian
+        t_local = [int(t + np.random.randn() * self.epsilon * self.window_size) for F in range(spatial_size)]
+        t_local = [max(self.window_size // 2 + 1, min(t_pp, T - self.window_size // 2)) for t_pp in t_local]
+        x_local = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_local])
+
+        # Split 80% of the samples into angular and spatial augmentation
+        x_n_angular = x_local[:int(x_local.shape[0] * 0.3)]
+        x_n_spatial = x_local[int(x_local.shape[0] * 0.3):]
+
+        # Angular augmentation with rotation in current location
+        z_angles = torch.rand(x_n_angular.shape[0]) * (360 - 4 * self.psi) + 2 * self.psi
+        x_angles = torch.rand(x_n_angular.shape[0]) * (360 - 4 * self.phi) + 2 * self.phi
+        augmented_data = torch.stack([augment_with_rotation(x_n_angular[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n_angular.shape[0])], dim=0)
+        x_n_angular[:, :3, :] = augmented_data
+
+        # Spatial augmentation, move the sector states in the window to other random sector states
+        x_n_np = x_n_spatial.numpy()
+        for i in range(x_n_np.shape[0]):
+            x_n_np[i, 3, :] = np.random.choice(r_bin_list[~np.isin(r_bin_list, x_n_np[i, 3, :])])
+            x_n_np[i, 4, :] = np.random.choice(theta_bin_list[~np.isin(theta_bin_list, x_n_np[i, 4, :])])
+            x_n_np[i, 5, :] = np.random.choice(z_bin_list[~np.isin(z_bin_list, x_n_np[i, 5, :])])
+        x_n_spatial = torch.tensor(x_n_np)
+        z_angles = torch.rand(x_n_spatial.shape[0]) * 360
+        x_angles = torch.rand(x_n_spatial.shape[0]) * 360
+        augmented_data = torch.stack([augment_with_rotation(x_n_spatial[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n_spatial.shape[0])], dim=0)
+        x_n_spatial[:, :3, :] = augmented_data
+
+        # Concatenate the angular and spatial augmented data
+        x_n = torch.cat((x_n_time, x_n_angular, x_n_spatial), dim=0)
+        shuffled_indices = torch.randperm(x_n.size(0))
+        x_n = x_n[shuffled_indices]
 
         return x_n
 
@@ -262,10 +300,10 @@ def learn_encoder(x, encoder, window_size, w, lr=0.001, decay=0.01, mc_sample_si
             batch_size = 10
         elif 'ADSB_arr' in path:
             # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device)
-            batch_size = 10
+            batch_size = 20
         elif 'ADSB_dep' in path:
             # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device)
-            batch_size = 10
+            batch_size = 20
         elif 'har' in path:
             # encoder = RnnEncoder(hidden_size=100, in_channel=561, encoding_size=10, device=device)
             batch_size = 10
@@ -289,13 +327,13 @@ def learn_encoder(x, encoder, window_size, w, lr=0.001, decay=0.01, mc_sample_si
         for epoch in range(n_epochs + 1):
             trainset = TNCDataset(x=torch.Tensor(x[:n_train]), mc_sample_size=mc_sample_size,
                                   window_size=window_size, augmentation=augmentation,
-                                  adf=True, psi=10, phi=3,
-                                  p_r=1, p_theta=1, p_z=1, r_bin=3, theta_bin=24, z_bin=3)
+                                  adf=True, psi=5, phi=1,
+                                  p_r=1, p_theta=1, p_z=1, r_bin=10, theta_bin=24, z_bin=10)
             train_loader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=3)
             validset = TNCDataset(x=torch.Tensor(x[n_train:]), mc_sample_size=mc_sample_size,
                                   window_size=window_size, augmentation=augmentation,
-                                  adf=True, psi=10, phi=3,
-                                  p_r=1, p_theta=1, p_z=1, r_bin=3, theta_bin=24, z_bin=3)
+                                  adf=True, psi=5, phi=1,
+                                  p_r=1, p_theta=1, p_z=1, r_bin=10, theta_bin=24, z_bin=10)
             valid_loader = data.DataLoader(validset, batch_size=batch_size, shuffle=True)
 
             epoch_loss, epoch_acc = epoch_run(train_loader, disc_model, encoder, optimizer=optimizer,
@@ -384,17 +422,17 @@ def main(is_train, data_type, cv, w, cont):
                     tnc_acc, tnc_auc, e2e_acc, e2e_auc))
 
     if data_type == 'ADSB_arr':
-        window_size = 50
+        window_size = 25
         # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
         # encoder = TransformerEncoder(d_model=6, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.1, encoding_size=15, device=device)
-        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.1, encoding_size=16, device=device)
+        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.3, encoding_size=20, device=device)
         path = './data/ADSB_data_arr/'
         if is_train:
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
                 x = pickle.load(f)
 
-            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-3, window_size=window_size, n_epochs=50,
-                          mc_sample_size=80, path='ADSB_arr', device=device, augmentation=5, n_cross_val=cv)
+            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100,
+                          mc_sample_size=100, path='ADSB_arr', device=device, augmentation=20, n_cross_val=cv)
         else:
             with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
                 x_test = pickle.load(f)
@@ -407,21 +445,21 @@ def main(is_train, data_type, cv, w, cont):
             # Plot the distribution of the encoding trajectories
             for i in range(x_test.shape[0]):
                 track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_arr', i, sliding_gap=10)
-            plot_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_arr', sliding_gap=10, n_clusters=20, max_cutoff_range=150)
-            plot_traj_TSNE(traj_test, 'ADSB_arr', n_clusters=20, max_cutoff_range=150)
+            plot_traj_TSNE(traj_test, 'ADSB_arr', max_cutoff_range=150)
+            plot_enc_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_arr', sliding_gap=10, max_cutoff_range=150)
 
     if data_type == 'ADSB_dep':
-        window_size = 50
+        window_size = 25
         # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
         # encoder = TransformerEncoder(d_model=6, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.1, encoding_size=15, device=device)
-        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.1, encoding_size=16, device=device)
+        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.3, encoding_size=20, device=device)
         path = './data/ADSB_data_dep/'
         if is_train:
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
                 x = pickle.load(f)
 
-            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-3, window_size=window_size, n_epochs=50,
-                          mc_sample_size=80, path='ADSB_dep', device=device, augmentation=5, n_cross_val=cv)
+            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100,
+                          mc_sample_size=100, path='ADSB_dep', device=device, augmentation=20, n_cross_val=cv)
         else:
             with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
                 x_test = pickle.load(f)
@@ -433,9 +471,9 @@ def main(is_train, data_type, cv, w, cont):
 
             # Plot the distribution of the encoding trajectories
             for i in range(x_test.shape[0]):
-                track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_dep', i, sliding_gap=10)
-            plot_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_dep', sliding_gap=10, n_clusters=20, max_cutoff_range=150)
-            plot_traj_TSNE(traj_test, 'ADSB_dep', n_clusters=20, max_cutoff_range=150)
+                track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_dep', i, sliding_gap=5)
+            plot_traj_TSNE(traj_test, 'ADSB_dep', max_cutoff_range=150)
+            plot_enc_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_dep', sliding_gap=5, max_cutoff_range=150)
 
     if data_type == 'waveform':
         window_size = 2500
@@ -501,7 +539,7 @@ def main(is_train, data_type, cv, w, cont):
 
 
 if __name__ == '__main__':
-    random.seed(42)
+    random.seed(1234)
     parser = argparse.ArgumentParser(description='Run TNC')
     parser.add_argument('--data', type=str, default='simulation')
     parser.add_argument('--cv', type=int, default=1)
