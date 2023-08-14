@@ -69,15 +69,10 @@ class BranchedTransformerEncoder(nn.Module):
         self.encoding_size = encoding_size
         self.device = device
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='gelu')
         self.encoder_1 = nn.TransformerEncoder(encoder_layer, num_layers)
         self.encoder_2 = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.fcn = nn.Sequential(
-            nn.Linear(int(d_model * 2), dim_feedforward),
-            nn.ReLU(),
-            nn.Dropout(p=dropout),  # Adding dropout with 50% probability
-            nn.Linear(dim_feedforward, encoding_size)
-        ).to(device)
+        self.fcn = nn.Linear(d_model * 2, encoding_size).to(device)  # Modify the output size of the linear layer
 
     def forward(self, x):
         x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device

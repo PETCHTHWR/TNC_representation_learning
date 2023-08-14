@@ -213,12 +213,11 @@ def preprocess(df, ref_lat, ref_lon, ref_alt=0, periods=200, max_range = 100,
     else:
         df_new = baroprojection(df_new, ref_lat, ref_lon, ref_alt)
 
+    df_new = resample(df_new, freq=freq) # resample to 1s
+    df_new = remove_outliers(df_new, threshold=zscore_threshold).interpolate() # remove outliers and interpolate
     df_new = clip(df_new, max_range)
     if len(df_new) == 0:
-        return None
-
-    df_new = resample(df_new, freq=freq) # resample to 1s
-    df_new = remove_outliers(df_new, threshold=zscore_threshold).interpolate() # remove outliers
+        return None # remove outliers
 
     if unify:
         df_new = interpolate(df_new, periods=periods) # interpolate to 200 points

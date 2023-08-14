@@ -115,8 +115,8 @@ def normalize_velocity(train_data, test_data, start_idx, end_idx):
 # Query parameters
 db_url = 'mysql://lics:aelics070@143.248.69.46:13306/atfm_new'
 id_tab, ADSB_tab = 'flight', 'trajectory'
-too_short, too_long = 300, 3500
-req_mul_arr, req_mul_dep = 100, 100
+too_short, too_long = 200, 3500
+req_mul_arr, req_mul_dep = 60, 60
 data_size = 4000
 
 # Filtering parameters
@@ -137,7 +137,8 @@ unify = True
 
 arr_dep = []
 for arrival in [True, False]:
-    ADSB = get_data(data_size, req_mul_arr, db_url, id_tab, ADSB_tab, too_short, too_long, int(arrival), alt_col)
+    req = req_mul_arr if arrival else req_mul_dep
+    ADSB = get_data(data_size, req, db_url, id_tab, ADSB_tab, too_short, too_long, int(arrival), alt_col)
     num_reject, num_dump, num_accept = 0, 0, 0
     df_ls, bearing, bins = [], [], [0, 110, 150, 210, 360]
     counts = {i: 0 for i in range(4)}
@@ -150,7 +151,7 @@ for arrival in [True, False]:
             try:
                 flt_df = preprocess(flt_df.dropna(), ref_lat=icn_lat, ref_lon=icn_lon, ref_alt=icn_alt,
                                     periods=target_length, max_range=max_cutoff_range, alt_column=alt_col, unify=unify,
-                                    freq='1s', zscore_threshold=3, window_size=3, order=2)  # preprocess
+                                    freq='1s', zscore_threshold=3, window_size=5, order=2)  # preprocess
             except Exception:  # if preprocessing fails
                 num_reject += 1
                 continue
