@@ -271,9 +271,10 @@ def calculate_velocities(flt_df: pd.DataFrame) -> pd.DataFrame:
 
     return vel_df
 
-def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, z_bins: int, r_max: float):
+def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, x_bins: int, y_bins: int, z_bins: int, r_max: float):
     """
-    Discretize 3D trajectories into radial, angular and vertical sectors, then normalize these to the range -1 to 1.
+    Discretize 3D trajectories into radial, angular and vertical sectors.
+    The computed radius and bearing values are normalized to the range [-1, 1].
     Input:
         df: A DataFrame containing the 3D trajectories.
         r_bins: The number of radial sectors.
@@ -281,27 +282,41 @@ def discretize_to_sectors(df: pd.DataFrame, r_bins: int, theta_bins: int, z_bins
         z_bins: The number of altitude sectors.
         r_max: The maximum radius to consider.
     Output:
-        df_sectors: A DataFrame with the sector assignments, normalized to -1 to 1.
+        df_sectors: A DataFrame with the sector assignments and normalized radius and bearing values.
     """
     # Calculate radius and bearing from x, y, z
     radius = (df['x']**2 + df['y']**2)**0.5
     bearing = np.arctan2(df['x'], df['y'])
 
-    # Normalize bearing to 0-2pi
+    # Normalize bearing to 0-2pi and then to -1 to 1 range
     bearing = (bearing + 2 * np.pi) % (2 * np.pi)
+    normalized_theta = 2 * (bearing / (2 * np.pi)) - 1
+
+    # Normalize radius to -1 to 1 range
+    normalized_radius = 2 * (radius / r_max) - 1
 
     # Discretize into sectors and normalize to -1 to 1
     r_sector = pd.cut(radius, bins=np.linspace(0, r_max, r_bins + 1), labels=False, include_lowest=True)
     r_sector = 2 * (r_sector / r_bins) - 1
     theta_sector = pd.cut(bearing, bins=np.linspace(0, 2 * np.pi, theta_bins + 1), labels=False, include_lowest=True)
     theta_sector = 2 * (theta_sector / theta_bins) - 1
+
+    x_sector = pd.cut(df['x'], bins=np.linspace(-r_max, r_max, x_bins + 1), labels=False, include_lowest=True)
+    x_sector = 2 * (x_sector / x_bins) - 1
+    y_sector = pd.cut(df['y'], bins=np.linspace(-r_max, r_max, y_bins + 1), labels=False, include_lowest=True)
+    y_sector = 2 * (y_sector / y_bins) - 1
+
     z_sector = pd.cut(df['z'], bins=np.linspace(0, r_max/10, z_bins + 1), labels=False, include_lowest=True)
     z_sector = 2 * (z_sector / z_bins) - 1
 
-    # Create new DataFrame with only the sector information
+    # Create new DataFrame with the sector information and normalized radius/bearing values
     df_sectors = pd.DataFrame({
+        'r': normalized_radius,
+        'theta': normalized_theta,
         'r_sector': r_sector,
         'theta_sector': theta_sector,
+        'x_sector': x_sector,
+        'y_sector': y_sector,
         'z_sector': z_sector
     })
 

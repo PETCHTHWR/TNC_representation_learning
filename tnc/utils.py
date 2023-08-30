@@ -1,7 +1,8 @@
 import os
 import pickle
+
+import hdbscan
 import numpy as np
-import cupy as cp
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -11,14 +12,22 @@ from matplotlib.patches import Ellipse
 import matplotlib.transforms as transforms
 import math
 from torch.utils import data
+from tqdm import tqdm
 import torch
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.cluster import KMeans, AgglomerativeClustering, AffinityPropagation, DBSCAN
 from sklearn.metrics import silhouette_score, davies_bouldin_score, silhouette_samples
+from sklearn_extra.cluster import KMedoids
+from sklearn.metrics.pairwise import cosine_similarity
 from yellowbrick.cluster import SilhouetteVisualizer
-import hdbscan
+from dtaidistance import dtw_ndim as dtw
+from tslearn.clustering import TimeSeriesKMeans as ts_kmeans
+from tslearn.clustering import silhouette_score as ts_silhouette_score
+from tslearn.preprocessing import TimeSeriesScalerMeanVariance
+from scipy.spatial.distance import cdist
+plt.rcParams["font.family"] = "DejaVu Sans"
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -154,16 +163,18 @@ def track_encoding_ADSB(sample, traj, encoder, window_size, path, idx, sliding_g
     axs[0].plot(traj[0, :], traj[1, :])  # Use line plot
     axs[0].set_xlabel('X', fontsize=22)
     axs[0].set_ylabel('Y', fontsize=22)
-    axs[0].set_title('Airport Trajectory', fontsize=30, fontweight='bold')
+    axs[0].set_title('2D Aircraft Trajectory', fontsize=30, fontweight='bold')
     axs[0].tick_params(axis='both', labelsize=22)
     axs[0].set_aspect('equal')
     axs[0].set_xlim(-170000, 170000) # Set x-axis limits
-    axs[0].set_ylim(-170000, 25000) # Set aspect ratio to make it square
+    axs[0].set_ylim(-170000, 170000) # Set aspect ratio to make it square
+    circle = plt.Circle((0, 0), 150000, color='r', fill=False)
+    axs[0].add_patch(circle)
 
     # Plot the second subplot as a line plot
-    for feat in range(min(sample.shape[0], 5)):
+    for feat in range(min(sample.shape[0], sample.shape[1])):
         axs[1].plot(np.arange(sample.shape[1]), sample[feat])
-    axs[1].set_title('Time series of Flight Path Cosine Vector', fontsize=30, fontweight='bold')
+    axs[1].set_title('Trajectory States', fontsize=30, fontweight='bold')
     axs[1].set_xlabel('Time', fontsize=22)
     axs[1].set_ylabel('Value', fontsize=22)
     axs[1].tick_params(axis='both', labelsize=22)
@@ -218,7 +229,8 @@ def encode_ADSB(sample, encoder, window_size, sliding_gap=5):
     encodings = torch.stack(encodings, 0)
     return encodings.detach().cpu().numpy().T
 
-def compute_cluster_scores(data, range_n_clusters):
+
+def compute_cluster_scores(distance_matrix, data, range_n_clusters, algorithm='Agglomerative'):
     best_n_clusters = 0
     best_score = -1
     dbi_scores = []
@@ -228,16 +240,24 @@ def compute_cluster_scores(data, range_n_clusters):
 
     for n_clusters in range_n_clusters:
 
-        hierarchical = AgglomerativeClustering(n_clusters=n_clusters)
-        cluster_assignments = hierarchical.fit_predict(data)
+        if algorithm == 'Agglomerative':
+            hierarchical = AgglomerativeClustering(n_clusters=n_clusters, affinity='precomputed', linkage='average')
+            cluster_assignments = hierarchical.fit_predict(distance_matrix)
+            silhouette_avg = silhouette_score(distance_matrix, cluster_assignments, metric='precomputed', random_state=42)
+            dbi = davies_bouldin_score(distance_matrix, cluster_assignments)
 
-        silhouette_avg = silhouette_score(data, cluster_assignments)
+        elif algorithm == 'KMedoids':
+            kmedoids = KMedoids(n_clusters=n_clusters, metric='precomputed', method='pam', random_state=42)
+            cluster_assignments = kmedoids.fit_predict(distance_matrix)
+            silhouette_avg = silhouette_score(distance_matrix, cluster_assignments, metric='precomputed', random_state=42)
+            dbi = davies_bouldin_score(distance_matrix, cluster_assignments)
+        else:
+            raise ValueError('Algorithm not supported')
+
         sil_scores.append(silhouette_avg)
         if silhouette_avg > best_score:
             best_score = silhouette_avg
             best_n_clusters = n_clusters
-
-        dbi = davies_bouldin_score(data, cluster_assignments)
         dbi_scores.append(dbi)
         if dbi < best_dbi_score:
             best_dbi_score = dbi
@@ -248,7 +268,7 @@ def compute_cluster_scores(data, range_n_clusters):
     print(f"Best number of clusters = {best_n_clusters} with silhouette score = {best_score}")
     print(f"Best number of clusters = {best_n_clusters_dbi} with DBI = {best_dbi_score}")
 
-    return max(best_n_clusters, best_n_clusters_dbi), sil_scores, dbi_scores
+    return best_n_clusters, sil_scores, dbi_scores
 
 
 def plot_scores(range_n_clusters, sil_scores, dbi_scores, path, filename):
@@ -268,16 +288,15 @@ def plot_scores(range_n_clusters, sil_scores, dbi_scores, path, filename):
     plt.savefig(os.path.join("./plots/%s" % path, filename))
 
 
-def plot_silhouette_visualizer(best_model, data, path, filename):
-    best_model.fit(data)
+def plot_silhouette_visualizer(best_model, data, distance_matrix, path, filename):
+
+    best_model.fit(distance_matrix)
     labels = best_model.labels_
-    silhouette_values = silhouette_samples(data, labels)
 
-    fig, ax = plt.subplots()
-    best_model.condensed_tree_.plot()
-    plt.savefig(os.path.join("./plots/%s" % path, filename + "_dendrogram.png"))
+    # Calculate silhouette scores using DTW distances
+    silhouette_values = silhouette_samples(distance_matrix, labels, metric='precomputed')
 
-    fig, ax = plt.subplots(figsize=(10,6))
+    fig, ax = plt.subplots(figsize=(10, 6))
     ax.set_xlim([-0.1, 1])
     ax.set_ylim([0, len(data) + (len(set(labels)) + 1) * 10])
 
@@ -289,10 +308,10 @@ def plot_silhouette_visualizer(best_model, data, path, filename):
         size_cluster_i = ith_cluster_silhouette_values.shape[0]
         y_upper = y_lower + size_cluster_i
 
-        color = cm.nipy_spectral(float(i) / len(set(labels)))
+        color = cm.rainbow(float(i) / len(set(labels))) # number of colors = number of clusters
         ax.fill_betweenx(np.arange(y_lower, y_upper),
-                          0, ith_cluster_silhouette_values,
-                          facecolor=color, edgecolor=color, alpha=0.7)
+                         0, ith_cluster_silhouette_values,
+                         facecolor=color, edgecolor=color, alpha=0.7)
 
         ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
 
@@ -300,20 +319,30 @@ def plot_silhouette_visualizer(best_model, data, path, filename):
 
     ax.set_xlabel("Silhouette Coefficient Values")
     ax.set_ylabel("Cluster Label")
-    ax.axvline(x=silhouette_score(data, labels), color="red", linestyle="--")
+    ax.axvline(x=np.mean(silhouette_values), color="red",
+               linestyle="--")  # Use the mean silhouette score instead of sklearn's silhouette_score
     ax.set_yticks([])
     ax.set_xticks([-0.1, 0, 0.2, 0.4, 0.6, 0.8, 1])
+
     plt.savefig(os.path.join("./plots/%s" % path, filename))
 
 
-def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename, single_cluster_filename, max_cutoff_range=150):
+def plot_TSNE(best_model, traj, enc_traj, to_be_fit, path, tsne_filename, cluster_filename, single_cluster_filename, max_cutoff_range=150):
     # Fit the data and get cluster assignments
-    cluster_assignments = best_model.fit_predict(enc_traj)
-    tsne = TSNE(n_components=2, random_state=42)
-    tsne_results = tsne.fit_transform(enc_traj)
+
+    tsne = TSNE(n_components=2, random_state=42, metric='precomputed', init='random')
+    tsne_results = tsne.fit_transform(to_be_fit)
+    cluster_assignments = best_model.fit_predict(to_be_fit)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     n_clusters = len(set(cluster_assignments))
+
+    cluster_centers = []
+    for i in range(n_clusters):
+        cluster_points = tsne_results[cluster_assignments == i]
+        cluster_center = np.mean(cluster_points, axis=0)
+        cluster_centers.append(cluster_center)
+
     cmap = plt.cm.get_cmap('rainbow', n_clusters)
     for i in set(cluster_assignments):
         c = 'black' if i == -1 else cmap(i)
@@ -321,7 +350,11 @@ def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename,
                    tsne_results[cluster_assignments == i, 1],
                    label=f'Cluster {i + 1}',
                    color=c, s=3)
-    ax.legend()
+    for i, center in enumerate(cluster_centers):
+        ax.text(center[0], center[1], f'Cluster {i + 1}', fontsize=10,
+                bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
+    legend = ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+    legend.set_title('Clusters')
     ax.set_title("t-SNE Plot")
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
@@ -333,7 +366,7 @@ def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename,
         c = 'black' if i == -1 else cmap(i)
         cluster_trajectories = traj[cluster_assignments == i]
         for trajectory in cluster_trajectories:
-            ax.plot(trajectory[0], trajectory[1], color=c, label=f'Cluster {i + 1}')
+            ax.plot(trajectory[0], trajectory[1], color=c, label=f'Cluster {i + 1}', alpha=0.2)
 
     handles, labels = plt.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
@@ -360,7 +393,7 @@ def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename,
         c = 'black' if cluster == -1 else cmap(cluster)
         cluster_trajectories = traj[cluster_assignments == cluster]
         for trajectory in cluster_trajectories:
-            ax.plot(trajectory[0], trajectory[1], color=c)
+            ax.plot(trajectory[0], trajectory[1], color=c, alpha=0.2)
         ax.set_title(f"Cluster {i + 1}")
         circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
         ax.add_patch(circle)
@@ -374,35 +407,62 @@ def plot_TSNE(best_model, traj, enc_traj, path, tsne_filename, cluster_filename,
     plt.close(fig)  # Close the figure to free up memory
 
 
-def plot_traj_TSNE(traj, path, max_cutoff_range=150, n_clusters=None):
-    traj_reshaped = traj.reshape(traj.shape[0], -1)
+def plot_traj_TSNE(traj, path, max_cutoff_range=150, n_clusters=None, reused_mat=False):
 
-    """if n_clusters is None:
-        range_n_clusters = list(range(8, 40))
-        best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(traj_reshaped, range_n_clusters)
+    if not reused_mat:
+        traj_reshape = np.reshape(traj, (traj.shape[0], -1))
+        dtw_matrix = dtw.distance_matrix_fast(np.transpose(traj, (0, 2, 1)).astype(np.double))
+        with open(os.path.join("./plots/%s" % path, "dist_mat_traj.pkl"), "wb") as f:
+            pickle.dump(dtw_matrix, f)
+    else:
+        traj_reshape = np.reshape(traj, (traj.shape[0], -1))
+        with open(os.path.join("./plots/%s" % path, "dist_mat_traj.pkl"), "rb") as f:
+            dtw_matrix = pickle.load(f)
+
+    to_be_fit = dtw_matrix
+    if n_clusters is None:
+        range_n_clusters = list(range(8, 30))
+        best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(to_be_fit, traj_reshape, range_n_clusters, algorithm='KMedoids')
         plot_scores(range_n_clusters, sil_scores, dbi_scores, path, "scores_traj.png")
     else:
-        best_n_clusters_dbi = n_clusters"""
+        best_n_clusters_dbi = n_clusters
 
-    best_model = hdbscan.HDBSCAN(min_cluster_size=10)
-    plot_silhouette_visualizer(best_model, traj_reshaped, path, "silhouette_visualizer_raw_traj.png")
-    plot_TSNE(best_model, traj, traj_reshaped, path, "raw_traj_tsne.png", "raw_traj_cluster.png", "raw_traj_cluster_single", max_cutoff_range=max_cutoff_range)
+    # best_model = AgglomerativeClustering(n_clusters=best_n_clusters_dbi, affinity='precomputed', linkage='average')
+    best_model = KMedoids(n_clusters=best_n_clusters_dbi, metric='precomputed', method='pam', random_state=42)
+    plot_TSNE(best_model, traj, traj_reshape, to_be_fit, path, "raw_traj_tsne.png", "raw_traj_cluster.png", "raw_traj_cluster_single", max_cutoff_range=max_cutoff_range)
+    plot_silhouette_visualizer(best_model, traj_reshape, to_be_fit, path, "silhouette_visualizer_raw_traj.png")
 
 
-def plot_enc_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, max_cutoff_range=150, n_clusters=None):
-    enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in
-                         range(sample.shape[0])]).reshape((sample.shape[0], -1))
+def plot_enc_TSNE(sample, traj, encoder, window_size, path, sliding_gap=5, max_cutoff_range=150, n_clusters=None, reused_enc=False):
+    if not reused_enc:
+        enc_traj = np.array([encode_ADSB(sample[i, :, :], encoder, window_size, sliding_gap=sliding_gap) for i in tqdm(range(sample.shape[0]))])
+        enc_reshape = np.reshape(enc_traj, (enc_traj.shape[0], -1))
+        with open(os.path.join("./plots/%s" % path, "enc_traj.pkl"), "wb") as f:
+            pickle.dump(enc_traj, f)
+        dtw_matrix = dtw.distance_matrix_fast(np.transpose(enc_traj, (0, 2, 1)).astype(np.double))
+        with open(os.path.join("./plots/%s" % path, "dist_mat.pkl"), "wb") as f:
+            pickle.dump(dtw_matrix, f)
+    else:
+        with open(os.path.join("./plots/%s" % path, "enc_traj.pkl"), "rb") as f:
+            enc_traj = pickle.load(f)
+            enc_reshape = np.reshape(enc_traj, (enc_traj.shape[0], -1))
+        with open(os.path.join("./plots/%s" % path, "dist_mat.pkl"), "rb") as f:
+            dtw_matrix = pickle.load(f)
 
-    """if n_clusters is None:
-        range_n_clusters = list(range(8, 40))
-        best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(enc_traj, range_n_clusters)
+    cosine_dist = 2 - 2 * np.clip(cosine_similarity(enc_reshape), -1, 1)
+    to_be_fit = cosine_dist
+
+    if n_clusters is None:
+        range_n_clusters = list(range(8, 30))
+        best_n_clusters_dbi, sil_scores, dbi_scores = compute_cluster_scores(to_be_fit, enc_reshape, range_n_clusters, algorithm='KMedoids')
         plot_scores(range_n_clusters, sil_scores, dbi_scores, path, "scores_enc.png")
     else:
-        best_n_clusters_dbi = n_clusters"""
+        best_n_clusters_dbi = n_clusters
 
-    best_model = hdbscan.HDBSCAN(min_cluster_size=10)
-    plot_silhouette_visualizer(best_model, enc_traj, path, "silhouette_visualizer_enc.png")
-    plot_TSNE(best_model, traj, enc_traj, path, "enc_tsne.png", "enc_cluster.png", "enc_cluster_single", max_cutoff_range=max_cutoff_range)
+    #best_model = AgglomerativeClustering(n_clusters=best_n_clusters_dbi, affinity='precomputed', linkage='average')
+    best_model = KMedoids(n_clusters=best_n_clusters_dbi, metric='precomputed', method='pam', random_state=42)
+    plot_TSNE(best_model, traj, enc_reshape, to_be_fit, path, "enc_tsne.png", "enc_cluster.png", "enc_cluster_single", max_cutoff_range=max_cutoff_range)
+    plot_silhouette_visualizer(best_model, enc_reshape, to_be_fit, path, "silhouette_visualizer_enc.png")
 
 
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
@@ -538,23 +598,6 @@ def rotate_3D(vector, angle_degrees_z, angle_degrees_x):
     rotated_vector = np.dot(rotation_matrix_x, rotated_vector)
     return rotated_vector
 
-def rotate_3D_cuda(vector, angle_degrees_z, angle_degrees_x):
-    vector = cp.asarray(vector)
-    theta_z = cp.radians(angle_degrees_z)
-    theta_x = cp.radians(angle_degrees_x)
-    cz = float(cp.cos(theta_z))
-    sz = float(cp.sin(theta_z))
-    cx = float(cp.cos(theta_x))
-    sx = float(cp.sin(theta_x))
-    rotation_matrix_z = cp.array([[cz, sz, 0],
-                                  [-sz, cz, 0],
-                                  [0, 0, 1]])
-    rotation_matrix_x = cp.array([[1, 0, 0],
-                                  [0, cx, sx],
-                                  [0, -sx, cx]])
-    rotated_vector = cp.dot(rotation_matrix_z, vector)
-    rotated_vector = cp.dot(rotation_matrix_x, rotated_vector)
-    return rotated_vector.get()
 
 def augment_with_offset(vector, off_x, off_y, off_z):
     offset = torch.stack([off_x, off_y, off_z], dim=0).to(vector.device)
@@ -638,3 +681,35 @@ def augment_sect_tensor(tensor, p_r = 0.5, p_theta = 0.5, p_z = 0.5,
     tensor += offsets
 
     return tensor
+
+def discretize_cartesian_to_sectors_np(data: np.ndarray, x_bins: int, y_bins: int, z_bins: int, max_cutoff_range: float):
+    """
+    Discretize 3D Cartesian coordinates into sectors and normalize the sector assignments.
+    Input:
+        data: A NumPy array containing the 3D Cartesian coordinates as (num_samples, 3, sequence_length) array.
+        x_bins: The number of bins for the x-axis.
+        y_bins: The number of bins for the y-axis.
+        z_bins: The number of bins for the z-axis.
+        max_cutoff_range: The maximum cutoff range for normalization.
+    Output:
+        sectors: A NumPy array with the normalized sector assignments in the range -1 to 1.
+    """
+    num_samples, num_features, sequence_length = data.shape
+    sector = np.zeros((num_samples, num_features, sequence_length))
+
+    # Discretize into sectors
+    x_sector = np.digitize(data[:, 0, :], np.linspace(-max_cutoff_range, max_cutoff_range, x_bins + 1)) - 1
+    y_sector = np.digitize(data[:, 1, :], np.linspace(-max_cutoff_range, max_cutoff_range, y_bins + 1)) - 1
+    z_sector = np.digitize(data[:, 2, :], np.linspace(0, max_cutoff_range/10, z_bins + 1)) - 1
+
+    # Normalize sector assignments to -1 to 1
+    x_normalized = 2 * (x_sector / x_bins) - 1
+    y_normalized = 2 * (y_sector / y_bins) - 1
+    z_normalized = 2 * (z_sector / z_bins) - 1
+
+    # Combine normalized sector assignments
+    sector[:, 0, :] = x_normalized
+    sector[:, 1, :] = y_normalized
+    sector[:, 2, :] = z_normalized
+
+    return sector

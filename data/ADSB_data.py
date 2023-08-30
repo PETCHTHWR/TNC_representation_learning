@@ -9,21 +9,24 @@ from tqdm import tqdm
 import connectorx as cx
 from atfm.preprocess import preprocess, smooth_savgol_vel, remove_outliers_vel
 from atfm.utils import calculate_unit_vectors, is_smooth, calculate_bearing, check_eligible_cupy, is_flight_path_smooth, discretize_to_sectors, calculate_velocities
-from sklearn.preprocessing import MinMaxScaler, MaxAbsScaler, RobustScaler
+from sklearn.preprocessing import MinMaxScaler, MaxAbsScaler, RobustScaler, StandardScaler
 from sklearn.impute import SimpleImputer
 
 def get_data(data_size, multiplier, db_url, id_tab, ADSB_tab, too_short, too_long, arrival_flag, alt_col):
-    required_data = int(data_size * multiplier)
-    query_ids = f"SELECT DISTINCT id FROM {id_tab} WHERE ori_length>={too_short} AND ori_length<={too_long} AND arrival={arrival_flag} ORDER BY RAND() LIMIT {required_data}"
-    ids_arr = cx.read_sql(db_url, query_ids, return_type="arrow")
-    ids_arr = ids_arr.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().sample(n=required_data).values.T.tolist()[0]
-    random.shuffle(ids_arr)
-    query_ADSB = f"SELECT time, flight_id, lat, lon, {alt_col} FROM {ADSB_tab} WHERE flight_id IN ({', '.join(map(str, ids_arr))});"
+    required_data = int(data_size * multiplier / 4)
+    ids = []
+    for sec_num in range(1, 5):
+        query_ids = f"SELECT DISTINCT id FROM {id_tab} WHERE ori_length>={too_short} AND ori_length<={too_long} AND arrival={arrival_flag} AND bearing_sector={sec_num} ORDER BY RAND() LIMIT {required_data}"
+        ids_q = cx.read_sql(db_url, query_ids, return_type="arrow")
+        ids_q = ids_q.to_pandas(split_blocks=False, date_as_object=False).dropna().drop_duplicates().values.T.tolist()[0]
+        ids.extend(ids_q)
+    random.shuffle(ids)
+    query_ADSB = f"SELECT time, flight_id, lat, lon, {alt_col} FROM {ADSB_tab} WHERE flight_id IN ({', '.join(map(str, ids))});"
     ADSB = cx.read_sql(db_url, query_ADSB, return_type="arrow")
     ADSB = ADSB.to_pandas(split_blocks=False, date_as_object=False).dropna()
     ADSB['time'] = pd.to_datetime(ADSB['time'], unit='s')
     ADSB = ADSB.groupby('flight_id')
-    print('Total data :', len(ids_arr))
+    print('Total data :', len(ids))
     return ADSB
 
 def normalize_features(train_data, test_data, start_idx, end_idx):
@@ -112,12 +115,39 @@ def normalize_velocity(train_data, test_data, start_idx, end_idx):
 
     return train_data_n, test_data_n
 
+def standardize_data(train_data, test_data):
+    """
+    Standardize the data based on the training data mean and standard deviation.
+    """
+    num_features = train_data.shape[1]
+
+    # Placeholder for standardized data
+    standardized_train = np.zeros_like(train_data)
+    standardized_test = np.zeros_like(test_data)
+
+    for i in range(num_features):
+        # Reshape each feature across all samples and timesteps for training data
+        feature_train = train_data[:, i, :].reshape(-1)
+        feature_test = test_data[:, i, :].reshape(-1)
+
+        # Standardize
+        mean = np.mean(feature_train)
+        std = np.std(feature_train)
+        standardized_train_feature = (feature_train - mean) / (std + 1e-10)
+        standardized_test_feature = (feature_test - mean) / (std + 1e-10)
+
+        # Reshape back and populate the standardized data
+        standardized_train[:, i, :] = standardized_train_feature.reshape(train_data.shape[0], -1)
+        standardized_test[:, i, :] = standardized_test_feature.reshape(test_data.shape[0], -1)
+
+    return standardized_train, standardized_test
+
 # Query parameters
 db_url = 'mysql://lics:aelics070@143.248.69.46:13306/atfm_new'
 id_tab, ADSB_tab = 'flight', 'trajectory'
 too_short, too_long = 200, 3500
-req_mul_arr, req_mul_dep = 60, 60
-data_size = 4000
+req_mul_arr, req_mul_dep = 1.04, 1.04
+data_size = 5000
 
 # Filtering parameters
 icn_lat, icn_lon, icn_alt = 37.463333, 126.440002, 8.0 # degrees, degrees, meters
@@ -128,7 +158,7 @@ max_angle_change, max_fltpath_change = 40, 20 # degrees
 
 # Preprocessing parameters
 target_length = 2000
-r_bins, theta_bins, z_bins = 10, 24, 10
+r_bins, theta_bins, x_bins, y_bins, z_bins = 10, 12, 10, 10, 10
 unify = True
 
 #ADSB_arr = get_data(data_size, req_mul_arr, db_url, id_tab, ADSB_tab, too_short, too_long, 1)
@@ -173,9 +203,9 @@ for arrival in [True, False]:
         flt_arr = cp.asarray(flt_df[['x', 'y', 'z']].values)  # Convert DataFrame to CuPy array
         max_dist = cp.max(cp.linalg.norm(flt_arr[:, :2], axis=1))  # Calculate maximum Euclidean norm for x, y
         min_alt = cp.min(flt_arr[:, 2])  # Calculate minimum altitude
-        touch_alt = flt_arr[0, 2] if arrival else flt_arr[-1, 2]  # Calculate touch altitude
+        touch_alt = flt_arr[-1, 2] if arrival else flt_arr[0, 2]  # Calculate touch altitude
         if max_dist < (max_cutoff_range - allowed_cutoff_error) * 1000 \
-                or max_dist > max_cutoff_range * 1000 or min_alt > FAF:
+                or max_dist > max_cutoff_range * 1000 or min_alt > FAF or touch_alt > FAF:
             counts[region] -= 1
             num_reject += 1
             continue
@@ -191,10 +221,11 @@ for arrival in [True, False]:
 
         # Discretize the data
         disc_df = discretize_to_sectors(flt_df, r_bins=r_bins, theta_bins=theta_bins,
-                                        z_bins=z_bins, r_max = max_cutoff_range * 1000)
+                                        x_bins=x_bins, y_bins=y_bins, z_bins=z_bins,
+                                        r_max = max_cutoff_range * 1000)
 
         # Join the dataframes
-        joined_df = pd.concat([flt_df, unit_df, disc_df], axis=1) # join the dataframes
+        joined_df = pd.concat([flt_df, unit_df, disc_df[['r_sector', 'theta_sector', 'x_sector', 'y_sector', 'z_sector']]], axis=1) # join the dataframes
         joined_df[unit_df.columns.tolist()] = \
             joined_df[unit_df.columns.tolist()].shift(-1) # shift the unit vectors by 1
         joined_df = joined_df.reset_index(drop=True)
@@ -229,6 +260,8 @@ for arrival in [True, False]:
     ax.set_ylabel('Frequency')
     ax.set_title('Histogram of North Bearing Groups')
     path = './data/ADSB_data_arr' if arrival else './data/ADSB_data_dep'
+    if not os.path.exists(path):
+        os.mkdir(path)
     plt.savefig(f'{path}/bearing_hist.png')
 
 for df_ls in arr_dep:
@@ -246,12 +279,20 @@ for df_ls in arr_dep:
     sampled_data = random.sample(flt_traj_and_path_ls, data_size)
     flt_traj_ls = [data[:3, :] for data in sampled_data]
     flt_traj_array = np.stack(flt_traj_ls, axis=0)
-
+    print(flt_traj_array.shape)
     flt_path_ls = [data[3:, :] for data in sampled_data]
     flt_path_array = np.stack(flt_path_ls, axis=0)
+    print(flt_path_array.shape)
 
-    n_train = int(len(flt_path_array) * 0.25)
-    train_data, test_data = flt_path_array[:n_train], flt_path_array[n_train:]
+    #flt_path_array = np.concatenate((flt_path_array,
+    #                                 flt_traj_array[:, :2, :]/max_cutoff_range/1000,
+    #                                 flt_traj_array[:, 2:, :]/max_cutoff_range/100*2-1), axis=1)
+
+    n_train = int(len(flt_path_array) * 0.5)
+    train_data, test_data = standardize_data(flt_path_array[:n_train], flt_path_array[n_train:])
+    train_data[:, 2, :] = np.clip(train_data[:, 2, :], -3, 3)
+    test_data[:, 2, :] = np.clip(test_data[:, 2, :], -3, 3)
+
     train_traj, test_traj = flt_traj_array[:n_train], flt_traj_array[n_train:]
 
     print("Data for Arrival" if df_ls is arr_dep[0] else "Data for Departure")
@@ -274,36 +315,36 @@ for df_ls in arr_dep:
     # Plot the trajectory profile
     fig, axs = plt.subplots(test_traj.shape[1], figsize=(10, 10))
     for i in range(test_traj.shape[1]):
-        axs[i].plot(np.arange(max_length), test_traj[:, i, :].T)
+        axs[i].plot(np.arange(max_length), test_traj[:, i, :].T, alpha=0.5)
         axs[i].set_ylabel('X' if i == 0 else 'Y' if i == 1 else 'Z')
     plt.tight_layout()
     fig.savefig(data_dir + '/original_trajectory_profile.png')
 
     # Plot the states profile
     fig, axs = plt.subplots(test_data.shape[1], figsize=(10, 20))
-    label = ['u_x', 'u_y', 'u_z', 'sec_r', 'sec_theta', 'sec_z']
+    label = ['u_x', 'u_y', 'u_z', 'r', 'theta','x', 'y', 'z']
     for i in range(test_data.shape[1]):
-        axs[i].plot(np.arange(max_length), test_data[:, i, :].T)
+        axs[i].plot(np.arange(max_length), test_data[:, i, :].T, alpha=0.5)
         axs[i].set_ylabel(label[i])
-        axs[i].set_ylim(-1, 1)
+        #axs[i].set_ylim(-1, 1)
     plt.tight_layout()
     fig.savefig(data_dir + '/states_profile.png')
 
     # Plot the trajectory profile
     fig, axs = plt.subplots(train_traj.shape[1], figsize=(10, 10))
     for i in range(train_traj.shape[1]):
-        axs[i].plot(np.arange(max_length), train_traj[:, i, :].T)
+        axs[i].plot(np.arange(max_length), train_traj[:, i, :].T, alpha=0.5)
         axs[i].set_ylabel('X' if i == 0 else 'Y' if i == 1 else 'Z')
     plt.tight_layout()
     fig.savefig(data_dir + '/original_trajectory_profile_train.png')
 
     # Plot the states profile
     fig, axs = plt.subplots(train_data.shape[1], figsize=(10, 20))
-    label = ['u_x', 'u_y', 'u_z', 'sec_r', 'sec_theta', 'sec_z']
+    label = ['u_x', 'u_y', 'u_z', 'r', 'theta','x', 'y', 'z']
     for i in range(train_data.shape[1]):
-        axs[i].plot(np.arange(max_length), train_data[:, i, :].T)
+        axs[i].plot(np.arange(max_length), train_data[:, i, :].T, alpha=0.5)
         axs[i].set_ylabel(label[i])
-        axs[i].set_ylim(-1, 1)
+        #axs[i].set_ylim(-1, 1)
     plt.tight_layout()
     fig.savefig(data_dir + '/states_profile_train.png')
 
@@ -314,15 +355,15 @@ for df_ls in arr_dep:
 
     # 2D topview plot
     fig, axs = plt.subplots(1, figsize=(10, 10))
-    axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T)
+    axs.plot(test_traj[:, 0, :].T, test_traj[:, 1, :].T, alpha=0.5)
 
     # Draw your sectors
     for r in r_edges:
-        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.5)
+        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.2)
         axs.add_artist(circle)
 
     for theta in theta_edges:
-        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.5)
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.2)
 
     # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)
@@ -337,15 +378,15 @@ for df_ls in arr_dep:
 
     # 2D topview plot with training data
     fig, axs = plt.subplots(1, figsize=(10, 10))
-    axs.plot(train_traj[:, 0, :].T, train_traj[:, 1, :].T)
+    axs.plot(train_traj[:, 0, :].T, train_traj[:, 1, :].T, alpha=0.5)
 
     # Draw your sectors
     for r in r_edges:
-        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.5)
+        circle = plt.Circle((0, 0), r, color='black', fill=False, alpha=0.2)
         axs.add_artist(circle)
 
     for theta in theta_edges:
-        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.5)
+        axs.plot([0, r_max * np.cos(theta)], [0, r_max * np.sin(theta)], color='black', alpha=0.2)
 
     # Add an outer circle
     circle = plt.Circle((0, 0), max_cutoff_range * 1000, color='r', fill=False)

@@ -21,16 +21,14 @@ from sklearn.manifold import TSNE
 
 import torch.nn.functional as F
 from tnc.models import RnnEncoder, WFEncoder, TransformerEncoder, BranchedTransformerEncoder
-from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_enc_TSNE, plot_traj_TSNE, augment_with_rotation, augment_sect_tensor
+from tnc.utils import plot_distribution, track_encoding, track_encoding_ADSB, plot_enc_TSNE, plot_traj_TSNE, augment_with_rotation, discretize_cartesian_to_sectors_np
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa.stattools import adfuller
 
 if not sys.warnoptions:
     import warnings
-
     warnings.simplefilter("ignore")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
 
 class Discriminator(torch.nn.Module):
     def __init__(self, input_size, device):
@@ -86,15 +84,16 @@ class TNCDataset(data.Dataset):
         x_t = self.time_series[ind][:, t - self.window_size // 2:t + self.window_size // 2]
         plt.savefig('./plots/%s_seasonal.png' % ind)
         X_close = self._find_neighours(self.time_series[ind], t)
-        X_distant = self._find_non_neighours(self.time_series[ind], t)
+        X_distant, _ = self._find_non_neighours(self.time_series[ind], ind)
 
         if self.state is None:
             y_t = -1
         else:
             y_t = torch.round(torch.mean(self.state[ind][t - self.window_size // 2:t + self.window_size // 2]))
+
         return x_t, X_close, X_distant, y_t
 
-    def _find_neighours(self, x, t):
+    def _find_neighours_spatial(self, x, t):
         T = self.time_series.shape[-1]
         if self.adf:
             gap = self.window_size
@@ -125,49 +124,7 @@ class TNCDataset(data.Dataset):
 
         return x_p
 
-    def _find_neighours_spatial(self, x, t):
-
-        window = x[:, t - self.window_size // 2:t + self.window_size // 2]
-        x_p = window.unsqueeze(0).repeat(self.mc_sample_size, 1, 1)
-
-        # Angular augmentation with rotation
-        z_angles = torch.normal(0, self.psi, size=(x_p.shape[0],))
-        x_angles = torch.normal(0, self.phi, size=(x_p.shape[0],))
-        augmented_data = torch.stack([augment_with_rotation(x_p[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_p.shape[0])], dim=0)
-        x_p[:, :3, :] = augmented_data
-
-        """# Spatial augmentation
-        augmented_data = augment_sect_tensor(x_p[:, 3:, :], p_r=self.p_r, p_theta=self.p_theta, p_z=self.p_z,
-                                             r_bins=self.r_bin, theta_bins=self.theta_bin, z_bins=self.z_bin)
-        x_p[:, 3:, :] = augmented_data"""
-
-        return x_p
-
-    def _find_non_neighours_temp(self, x, t):
-        T = self.time_series.shape[-1]
-        if t > T / 2:
-            t_n = np.random.randint(self.window_size // 2, max((t - self.delta + 1), self.window_size // 2 + 1), self.mc_sample_size)
-        else:
-            t_n = np.random.randint(min((t + self.delta), (T - self.window_size - 1)), (T - self.window_size // 2), self.mc_sample_size)
-        x_n = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_n])
-
-        if len(x_n) == 0:
-            rand_t = np.random.randint(0, self.window_size // 5)
-            if t > T / 2:
-                x_n = x[:, rand_t:rand_t + self.window_size].unsqueeze(0)
-            else:
-                x_n = x[:, T - rand_t - self.window_size:T - rand_t].unsqueeze(0)
-        return x_n
-
-        # Angular augmentation with rotation
-        #z_angles = torch.normal(0, self.psi, size=(x_n.shape[0],))
-        #x_angles = torch.normal(0, self.phi, size=(x_n.shape[0],))
-        #augmented_data = torch.stack([augment_with_rotation(x_n[i, :3, :], z_angles[i], x_angles[i]) for i in range(x_n.shape[0])], dim=0)
-        #x_n[:, :3, :] = augmented_data
-
-        return x_n
-
-    def _find_non_neighours(self, x, t):
+    def _find_non_neighours_spatial(self, x, t):
         T = self.time_series.shape[-1]
         negative_size = self.mc_sample_size
         spatial_size = int(negative_size * 0.8)
@@ -230,6 +187,45 @@ class TNCDataset(data.Dataset):
 
         return x_n
 
+    def _find_neighours(self, x, t):
+
+        T = self.time_series.shape[-1]
+        if self.adf:
+            gap = self.window_size
+            corr = []
+            for w_t in range(self.window_size, 4 * self.window_size, gap):
+                try:
+                    p_val = 0
+                    for f in range(x.shape[-2]):
+                        if f < 3:
+                            p = adfuller(np.array(x[f, max(0, t - w_t):min(x.shape[-1], t + w_t)].reshape(-1, )))[1]
+                        else:
+                            p = adfuller(np.array(x[f, max(0, t - w_t):min(x.shape[-1], t + w_t)].reshape(-1, )))[1]
+                        p_val += 0.01 if math.isnan(p) else p
+                    corr.append(p_val / x.shape[-2])
+                except:
+                    corr.append(0.6)
+            self.epsilon = len(corr) if len(np.where(np.array(corr) >= 0.01)[0]) == 0 else (
+                    np.where(np.array(corr) >= 0.01)[0][0] + 1)
+            self.delta = 5 * self.epsilon * self.window_size
+
+        ## Random from a Gaussian
+        t_p = [int(t + np.random.randn() * self.epsilon * self.window_size) for F in range(self.mc_sample_size)]
+        t_p = [max(self.window_size // 2 + 1, min(t_pp, T - self.window_size // 2)) for t_pp in t_p]
+        x_p = torch.stack([x[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for t_ind in t_p])
+
+        return x_p
+
+    def _find_non_neighours(self, x, ind):
+
+        T = self.time_series.shape[-1]
+        inds_n = [i for i in np.arange(self.time_series.shape[0]) if i != ind]
+        s_n = self.time_series[np.random.choice(inds_n, size=self.mc_sample_size, replace=True)]
+        t_n = np.random.randint(self.window_size // 2, T - self.window_size // 2, size=self.mc_sample_size)
+        x_n = torch.stack([s_ind[:, t_ind - self.window_size // 2:t_ind + self.window_size // 2] for s_ind, t_ind in zip(s_n, t_n)])
+
+        return x_n, s_n
+
 
 def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=True):
     if train:
@@ -240,6 +236,7 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
         disc_model.eval()
     # loss_fn = torch.nn.BCELoss()
     loss_fn = torch.nn.BCEWithLogitsLoss()
+    #loss_trp = torch.nn.TripletMarginWithDistanceLoss(distance_function=torch.nn.CosineSimilarity(), margin=0.5)
     encoder.to(device)
     disc_model.to(device)
     epoch_loss = 0
@@ -266,7 +263,7 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
         n_loss = loss_fn(d_n, non_neighbors)
         n_loss_u = loss_fn(d_n, neighbors)
 
-        loss = (p_loss + w * n_loss_u + (1 - w) * n_loss) / 2
+        loss = (p_loss + w * n_loss_u + (1 - w) * n_loss) / 2 #+ loss_trp(z_t, z_p, z_n)
 
         if train:
             optimizer.zero_grad()
@@ -397,66 +394,68 @@ def main(is_train, data_type, cv, w, cont):
                     tnc_acc, tnc_auc, e2e_acc, e2e_auc))
 
     if data_type == 'ADSB_arr':
-        window_size = 50
-        # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
-        # encoder = TransformerEncoder(d_model=6, nhead=6, num_layers=6, dim_feedforward=512, dropout=0.1, encoding_size=15, device=device)
-        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=3, dim_feedforward=512, dropout=0.3, encoding_size=15, device=device)
+        window_size = 20
+        encoder = TransformerEncoder(d_model=8, nhead=8, num_layers=6, dim_feedforward=256, dropout=0.1, encoding_size=10, device=device)
         path = './data/ADSB_data_arr/'
         if is_train:
+            # Load the training data
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
-                x = pickle.load(f)
-                x = x[np.random.choice(x.shape[0], 800, replace=False), :, :]
+                x = pickle.load(f)[:2500, :, ::2]
+                print('train shape: ', x.shape)
 
-            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=50, batch_size=10,
-                          mc_sample_size=100, path='ADSB_arr', device=device, augmentation=10, n_cross_val=cv)
+            # Train the encoder
+            learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=100, batch_size=10,
+                          mc_sample_size=100, path=data_type, device=device, augmentation=4, n_cross_val=cv, cont=False)
+
         else:
+            # Load the test data
             with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
-                x_test = pickle.load(f)
-                ind = np.random.choice(x_test.shape[0], 1000, replace=False)
-                x_test = x_test[ind, :, :]
+                x_test = pickle.load(f)[:2000, :, ::2]
+                print('test shape: ', x_test.shape)
             with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
-                traj_test = pickle.load(f)
-                traj_test = traj_test[ind, :, :]
+                traj_test = pickle.load(f)[:2000, :, ::20]
+                print('traj shape: ', traj_test.shape)
+
+            # Load the trained encoder
             checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
 
             # Plot the distribution of the encoding trajectories
-            for i in np.random.choice(x_test.shape[0], 100, replace=False):
-                track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_arr', i, sliding_gap=10)
-            plot_traj_TSNE(traj_test, 'ADSB_arr', max_cutoff_range=150)
-            plot_enc_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_arr', sliding_gap=10, max_cutoff_range=150)
+            for i in np.random.choice(x_test.shape[0], 100, replace=False): track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, data_type, i, sliding_gap=20)
+            plot_traj_TSNE(traj_test, data_type, reused_mat=True, n_clusters=8)
+            plot_enc_TSNE(x_test, traj_test, encoder, window_size, data_type, sliding_gap=20, reused_enc=True, n_clusters=8)
 
     if data_type == 'ADSB_dep':
         window_size = 50
-        # encoder = RnnEncoder(hidden_size=100, in_channel=3, encoding_size=15, device=device, cell_type='GRU')
-        # encoder = TransformerEncoder(d_model=6, nhead=3, num_layers=6, dim_feedforward=128, dropout=0.1, encoding_size=15, device=device)
-        encoder = BranchedTransformerEncoder(d_model=3, nhead=3, num_layers=3, dim_feedforward=512, dropout=0.3, encoding_size=15, device=device)
+        encoder = TransformerEncoder(d_model=8, nhead=8, num_layers=1, dim_feedforward=128, dropout=0.1, encoding_size=10, device=device)
         path = './data/ADSB_data_dep/'
         if is_train:
             with open(os.path.join(path, 'x_train.pkl'), 'rb') as f:
-                x = pickle.load(f)
-                x = x[np.random.choice(x.shape[0], 800, replace=False), :, :]
-
+                x = pickle.load(f)[:1000, :, :]
+            with open(os.path.join(path, 'traj_train.pkl'), 'rb') as f:
+                traj_train = pickle.load(f)[:1000, :, :]
+            x = np.concatenate((x, discretize_cartesian_to_sectors_np(traj_train, 10, 10, 10, 150000)[:, :-1, :]), axis=1)
+            print('train shape: ', x.shape)
             learn_encoder(x, encoder, w=w, lr=1e-3, decay=1e-5, window_size=window_size, n_epochs=50, batch_size=10,
-                          mc_sample_size=100, path='ADSB_dep', device=device, augmentation=10, n_cross_val=cv)
+                          mc_sample_size=100, path=data_type, device=device, augmentation=10, n_cross_val=cv)
+
         else:
             with open(os.path.join(path, 'x_test.pkl'), 'rb') as f:
-                x_test = pickle.load(f)
-                ind = np.random.choice(x_test.shape[0], 1000, replace=False)
-                x_test = x_test[ind, :, :]
+                x_test = pickle.load(f)[:2000, :, :]
             with open(os.path.join(path, 'traj_test.pkl'), 'rb') as f:
-                traj_test = pickle.load(f)
-                traj_test = traj_test[ind, :, :]
+                traj_test = pickle.load(f)[:2000, :, :]
+            x_test = np.concatenate((x_test, discretize_cartesian_to_sectors_np(traj_test, 10, 10, 10, 150000)[:, :-1, :]), axis=1)
+            print('test shape: ', x_test.shape)
+
             checkpoint = torch.load('./ckpt/%s/checkpoint_0.pth.tar' % (data_type))
             encoder.load_state_dict(checkpoint['encoder_state_dict'])
             encoder = encoder.to(device)
 
             # Plot the distribution of the encoding trajectories
-            for i in np.random.choice(x_test.shape[0], 100, replace=False):
-                track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, 'ADSB_dep', i, sliding_gap=10)
-            plot_traj_TSNE(traj_test, 'ADSB_dep', max_cutoff_range=150)
-            plot_enc_TSNE(x_test, traj_test, encoder, window_size, 'ADSB_dep', sliding_gap=10, max_cutoff_range=150)
+            for i in np.random.choice(x_test.shape[0], 100, replace=False): track_encoding_ADSB(x_test[i, :, :], traj_test[i, :, :], encoder, window_size, data_type, i, sliding_gap=20)
+            plot_traj_TSNE(traj_test, data_type, max_cutoff_range=150, n_clusters=20)
+            plot_enc_TSNE(x_test, traj_test, encoder, window_size, data_type, sliding_gap=20, max_cutoff_range=150)
 
     if data_type == 'waveform':
         window_size = 2500
@@ -522,7 +521,7 @@ def main(is_train, data_type, cv, w, cont):
 
 
 if __name__ == '__main__':
-    random.seed(42)
+    random.seed(1234)
     parser = argparse.ArgumentParser(description='Run TNC')
     parser.add_argument('--data', type=str, default='simulation')
     parser.add_argument('--cv', type=int, default=1)

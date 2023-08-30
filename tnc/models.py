@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import math
 
 class RnnEncoder(torch.nn.Module):
     def __init__(self, hidden_size, in_channel, encoding_size, cell_type='GRU', num_layers=1, device='cpu', dropout=0, bidirectional=True):
@@ -36,6 +36,45 @@ class RnnEncoder(torch.nn.Module):
         encodings = self.nn(out[-1].squeeze(0))
         return encodings
 
+class TransformerEncoderOld(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1, encoding_size=15, device='cpu'):
+        super(TransformerEncoderOld, self).__init__()
+
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.encoding_size = encoding_size
+        self.device = device
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers).to(device)
+        self.fcn = nn.Linear(d_model, encoding_size).to(device)  # Modify the output size of the linear layer
+    def forward(self, x):
+        x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device
+        encodings = self.encoder(x)
+        # encodings = encodings[-1].squeeze(0) # Take the last layer output and remove the time step dimension
+        encodings = torch.mean(encodings, dim=0).squeeze(0)
+        encodings = self.fcn(encodings) # Apply the FCN to map to the desired output size
+
+        return encodings
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1, encoding_size=15, device='cpu'):
         super(TransformerEncoder, self).__init__()
@@ -46,18 +85,22 @@ class TransformerEncoder(nn.Module):
         self.encoding_size = encoding_size
         self.device = device
 
+        self.cls_token = nn.Parameter(torch.randn(1, d_model, 1)).to(device) # Introducing a learnable token to the input
+        self.pos_encoder = PositionalEncoding(d_model, dropout).to(device) # Positional encoding
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers).to(device) # The transformer encoder
         self.fcn = nn.Linear(d_model, encoding_size).to(device)  # Modify the output size of the linear layer
 
     def forward(self, x):
-        x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device
-        encodings = self.encoder(x)
-        encodings = encodings[-1].squeeze(0)  # Take the last layer output and remove the time step dimension
-        encodings = self.fcn(encodings)  # Apply the FCN to map to the desired output size
+        cls_tokens = self.cls_token.repeat(x.shape[0], 1, 1) # Adding the token to the beginning of every sequence in the batch, Shape: (N, E, 1)
+        x = torch.cat([cls_tokens, x], dim=2).to(self.device) # Shape: (N, E, S+1)
+        x = x.permute(2, 0, 1) # Permuted to (S+1, N, E)
+        x = self.pos_encoder(x) # Apply positional encoding
+        encodings = self.encoder(x) # Apply the transformer encoder
+        token_representations = encodings[0] #Extracting the token's representation after the encoder, Shape: (N, E)
+        encodings = self.fcn(token_representations) # Apply the FCN to map to the desired output size
 
         return encodings
-
 
 class BranchedTransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward=128, dropout=0.5, encoding_size=18, device='cpu'):
@@ -70,9 +113,9 @@ class BranchedTransformerEncoder(nn.Module):
         self.device = device
 
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='gelu')
-        self.encoder_1 = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.encoder_2 = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.fcn = nn.Linear(d_model * 2, encoding_size).to(device)  # Modify the output size of the linear layer
+        self.encoder_1 = nn.TransformerEncoder(encoder_layer, num_layers).to(self.device)
+        self.encoder_2 = nn.TransformerEncoder(encoder_layer, num_layers).to(self.device)
+        self.fcn = nn.Linear(d_model * 2, encoding_size).to(self.device)  # Modify the output size of the linear layer
 
     def forward(self, x):
         x = x.permute(2, 0, 1).to(self.device)  # The input is (N, E, S) so we need to permute the dimensions to (S, N, E) and move to the specified device
@@ -80,10 +123,10 @@ class BranchedTransformerEncoder(nn.Module):
         x2 = x[:, :, int(x.shape[-1] / 2):]
 
         encodings_1 = self.encoder_1(x1)
-        encodings_1 = encodings_1[-1].squeeze(0)
+        encodings_1 = torch.mean(encodings_1, dim=0).squeeze(0)
 
         encodings_2 = self.encoder_2(x2)
-        encodings_2 = encodings_2[-1].squeeze(0)
+        encodings_2 = torch.mean(encodings_2, dim=0).squeeze(0)
 
         encodings = torch.cat((encodings_1, encodings_2), dim=-1)
         encodings = self.fcn(encodings)
